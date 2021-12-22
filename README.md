@@ -1,6 +1,6 @@
 # Snowstorm
 
-Minimalistic encryption protocol for rust async streams, based on [noise protocol](http://www.noiseprotocol.org/) and [snow](https://crates.io/crates/snow).
+A minimalistic encryption protocol for rust async streams, based on [noise protocol](http://www.noiseprotocol.org/) and [snow](https://crates.io/crates/snow).
 
 ## Quick Start
 

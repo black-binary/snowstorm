@@ -3,7 +3,10 @@ name = "snowstorm"
 version = "0.1.0"
 edition = "2021"
 authors = ["black-binary <blackbinary@qq.com>"]
-license = "MIT"
+license = "Apache-2.0"
+repository = "https://github.com/black-binary/snowstorm"
+readme = "README.md"
+description = "A minimalistic encryption protocol"
 
 [dependencies]
 snow = "0.8"
