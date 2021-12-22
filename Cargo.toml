@@ -1,0 +1,18 @@
+[package]
+name = "snowstorm"
+version = "0.1.0"
+edition = "2021"
+authors = ["black-binary <blackbinary@qq.com>"]
+license = "MIT"
+
+[dependencies]
+snow = "0.8"
+thiserror = "1"
+bytes = "1"
+futures-util = "0.3"
+tokio = { version = "1", features = ["io-util"] }
+pin-project = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
