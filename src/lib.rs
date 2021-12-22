@@ -30,18 +30,6 @@ pub enum Error {
     HandshakeStateError(String),
 }
 
-async fn read_u16<T: AsyncRead + Unpin>(r: &mut T) -> std::io::Result<u16> {
-    let mut buf = [0; 2];
-    r.read_exact(&mut buf).await?;
-    Ok(u16::from_le_bytes(buf))
-}
-
-async fn write_u16<T: AsyncWrite + Unpin>(w: &mut T, n: u16) -> std::io::Result<()> {
-    let buf: [u8; 2] = n.to_le_bytes();
-    w.write_all(&buf).await?;
-    Ok(())
-}
-
 #[derive(Debug)]
 enum ReadState {
     Idle,
@@ -87,10 +75,10 @@ where
             let mut read_buf = [0; HANDSHAKE_FRAME_LEN];
             if state.is_my_turn() {
                 let len = state.write_message(&[], &mut message)?;
-                write_u16(&mut inner, len as u16).await?;
+                inner.write_u16_le(len as u16).await?;
                 inner.write_all(&message[..len]).await?;
             } else {
-                let len = read_u16(&mut inner).await? as usize;
+                let len = inner.read_u16_le().await? as usize;
                 inner.read_exact(&mut message[..len]).await?;
                 state.read_message(&message[..len], &mut read_buf)?;
             }
