@@ -1,12 +1,12 @@
 # Snowstorm
 
-A minimalistic encryption protocol for rust async streams, based on [noise protocol](http://www.noiseprotocol.org/) and [snow](https://crates.io/crates/snow).
+A minimalistic encryption protocol for rust async streams / packets, based on [noise protocol](http://www.noiseprotocol.org/) and [snow](https://crates.io/crates/snow).
 
 ## Quickstart
 
-Snowstorm allows you to secure any streams implemented `AsyncRead + AsyncWrite + Unpin`.
+Snowstorm allows you to secure any streams implemented `AsyncRead + AsyncWrite + Unpin`. For example, `TcpStream` in Tokio. Note that the underlying connections **need to be reliable**.
 
-## Generate Key Pair
+### Create a Key Pair
 
 ```rust
 // Noise protocol params, see: http://www.noiseprotocol.org/noise.html#protocol-names-and-modifiers
@@ -16,7 +16,7 @@ static PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
 let key_pair = snowstorm::Builder::new(PATTERN.parse()?).generate_keypair().unwrap()
 ```
 
-### Client 
+#### Client 
 
 ```rust
 
@@ -36,7 +36,7 @@ let mut secured_stream = NoiseStream::handshake(stream, initiator).await?;
 secured_stream.write_all(b"hello world").await?;
 ```
 
-### Server
+#### Server
 
 ```rust
 
@@ -60,12 +60,18 @@ secured_stream.read(&mut buf).await?;
 
 ## Spec
 
+### Stream
+
 [ `length` (2 bytes, little endian) ] [ `noise message` (`length` bytes) ]
+
+### Packet
+
+[ `nonce` (8 bytes) ] [ `noise message` ]
 
 ## Todo
 
-- [ ] UDP Support
+- [x] UDP Support
 - [ ] Documentation
-- [ ] Benchmarks
+- [x] Benchmarks
 - [ ] Async-std support
 

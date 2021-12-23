@@ -38,7 +38,7 @@ async fn get_pair(p: &str) -> (NoiseStream<TcpStream>, NoiseStream<TcpStream>) {
 fn bench_throughput(c: &mut Criterion) {
     const PAYLOAD_LEN: usize = 256 * 1024 * 1024;
     const PAYLOAD: &[u8] = &[0; PAYLOAD_LEN];
-    let PATTERNS: &[&str] = &[
+    const PATTERNS: &[&str] = &[
         "Noise_NN_25519_ChaChaPoly_BLAKE2s",
         "Noise_NN_25519_ChaChaPoly_BLAKE2b",
         "Noise_NN_25519_AESGCM_BLAKE2s",

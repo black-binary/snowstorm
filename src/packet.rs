@@ -130,25 +130,67 @@ impl<T: PacketPoller> NoisePacket<T> {
     }
 }
 
-//impl<T: Clone, P: PacketPoller<MetaInfo = T>> P {}
+#[cfg(test)]
+mod tests {
+    use std::{
+        net::SocketAddr,
+        task::{Context, Poll},
+        time::Duration,
+    };
 
-//impl PacketPoller for UdpSocket {
-//    type MetaInfo = SocketAddr;
-//
-//    fn poll_send_to(
-//        &self,
-//        cx: &mut Context<'_>,
-//        buf: &[u8],
-//        meta: Self::MetaInfo,
-//    ) -> Poll<std::io::Result<usize>> {
-//        self.poll_send_to(cx, buf, meta)
-//    }
-//
-//    fn poll_recv_from(
-//        &self,
-//        cx: &mut Context<'_>,
-//        buf: &mut ReadBuf<'_>,
-//    ) -> Poll<std::io::Result<Self::MetaInfo>> {
-//        self.poll_recv_from(cx, buf)
-//    }
-//}
+    use tokio::{io::ReadBuf, net::UdpSocket};
+
+    use crate::{NoisePacket, PacketPoller};
+
+    impl PacketPoller for UdpSocket {
+        type MetaInfo = SocketAddr;
+
+        fn poll_send_to(
+            &self,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+            meta: Self::MetaInfo,
+        ) -> Poll<std::io::Result<usize>> {
+            self.poll_send_to(cx, buf, meta)
+        }
+
+        fn poll_recv_from(
+            &self,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<Self::MetaInfo>> {
+            self.poll_recv_from(cx, buf)
+        }
+    }
+
+    #[tokio::test]
+    async fn udp() {
+        static PATTERN: &str = "Noise_NN_25519_ChaChaPoly_BLAKE2s";
+        let s = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let s_addr = s.local_addr().unwrap();
+        let c = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let c_addr = c.local_addr().unwrap();
+
+        let initiator = snow::Builder::new(PATTERN.parse().unwrap())
+            .build_initiator()
+            .unwrap();
+        let responder = snow::Builder::new(PATTERN.parse().unwrap())
+            .build_responder()
+            .unwrap();
+
+        tokio::spawn(async move {
+            let a = NoisePacket::handshake(s, initiator, c_addr, Duration::from_secs(1), 3)
+                .await
+                .unwrap();
+            a.send_to(b"hello world!", c_addr).await.unwrap();
+        });
+
+        let b = NoisePacket::handshake(c, responder, s_addr, Duration::from_secs(1), 3)
+            .await
+            .unwrap();
+        let mut buf = vec![0; 0x100];
+        let (n, _) = b.recv_from(&mut buf).await.unwrap();
+        let s = String::from_utf8_lossy(&buf[..n]);
+        println!("{}", s);
+    }
+}
