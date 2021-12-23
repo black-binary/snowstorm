@@ -12,7 +12,7 @@ Snowstorm allows you to secure any streams implemented `AsyncRead + AsyncWrite +
 // Noise protocol params, see: http://www.noiseprotocol.org/noise.html#protocol-names-and-modifiers
 static PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s"; 
 
-// Generate the private and the public key
+// Generate a private / public key pair
 let key_pair = snowstorm::Builder::new(PATTERN.parse()?).generate_keypair().unwrap()
 ```
 
