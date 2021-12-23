@@ -2,7 +2,7 @@
 
 A minimalistic encryption protocol for rust async streams, based on [noise protocol](http://www.noiseprotocol.org/) and [snow](https://crates.io/crates/snow).
 
-## Quick Start
+## Quickstart
 
 Snowstorm allows you to secure any streams implemented `AsyncRead + AsyncWrite + Unpin`.
 

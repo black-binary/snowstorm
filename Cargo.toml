@@ -13,10 +13,16 @@ snow = "0.8"
 thiserror = "1"
 bytes = "1"
 futures-util = "0.3"
-tokio = { version = "1", features = ["io-util"] }
+tokio = { version = "1", features = ["io-util", "time"] }
 pin-project = "1"
 rand = "0.8"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
+criterion = { version = "0.3", features = ["async_tokio"] }
+lazy_static = "1.4"
+
+[[bench]]
+name = "stress"
+harness = false

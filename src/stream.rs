@@ -4,7 +4,6 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-use bytes::{Buf, BufMut, BytesMut};
 use futures_util::ready;
 use pin_project::pin_project;
 use snow::{HandshakeState, TransportState};
@@ -21,14 +20,14 @@ use crate::{Error, HANDSHAKE_FRAME_LEN, MAX_FRAME_LEN, TAG_LEN};
 enum ReadState {
     Idle,
     ReadLen(usize, [u8; 2]),
-    ReadMessage(usize, Vec<u8>),
-    ServePayload(BytesMut),
+    ReadMessage(usize),
+    ServePayload(usize),
 }
 
 #[derive(Debug)]
 enum WriteState {
     Idle,
-    WriteMessage(BytesMut),
+    WriteMessage(usize, usize),
 }
 
 #[pin_project]
@@ -39,6 +38,11 @@ pub struct NoiseStream<T> {
     read_state: ReadState,
     write_state: WriteState,
     write_clean_waker: Option<Waker>,
+
+    read_message_buffer: Vec<u8>,
+    read_payload_buffer: Vec<u8>,
+
+    write_message_buffer: Vec<u8>,
 }
 
 impl<T> NoiseStream<T>
@@ -55,11 +59,15 @@ where
                     read_state: ReadState::Idle,
                     write_state: WriteState::Idle,
                     write_clean_waker: None,
+                    read_message_buffer: vec![],
+                    read_payload_buffer: vec![],
+                    write_message_buffer: vec![],
                 });
             }
 
-            let mut message = [0; HANDSHAKE_FRAME_LEN];
-            let mut read_buf = [0; HANDSHAKE_FRAME_LEN];
+            let mut message = vec![0; HANDSHAKE_FRAME_LEN];
+            let mut payload = vec![0; HANDSHAKE_FRAME_LEN];
+
             if state.is_my_turn() {
                 let len = state.write_message(&[], &mut message)?;
                 inner.write_u16_le(len as u16).await?;
@@ -67,7 +75,7 @@ where
             } else {
                 let len = inner.read_u16_le().await? as usize;
                 inner.read_exact(&mut message[..len]).await?;
-                state.read_message(&message[..len], &mut read_buf)?;
+                state.read_message(&message[..len], &mut payload)?;
             }
         }
     }
@@ -86,37 +94,34 @@ where
         let mut inner = this.inner;
         let state = this.write_state;
         let transport = this.transport;
+        let write_message_buffer = this.write_message_buffer;
 
         loop {
             match state {
                 WriteState::Idle => {
-                    let mut cur = buf;
-                    // TODO optimization
-                    let mut buf = vec![0; MAX_FRAME_LEN];
-
-                    let mut message = BytesMut::new();
-
-                    while cur.has_remaining() {
-                        let n = cur.remaining().min(MAX_FRAME_LEN - TAG_LEN);
-                        let msg_len = transport
-                            .write_message(&cur[..n], &mut buf)
-                            .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
-                        message.put_u16_le(msg_len as u16);
-                        message.put_slice(&buf[..msg_len]);
-                        cur.advance(n);
-                    }
-                    *state = WriteState::WriteMessage(message);
+                    let payload_len = buf.len().min(MAX_FRAME_LEN - TAG_LEN);
+                    let buf = &buf[..payload_len];
+                    write_message_buffer.resize(2 + MAX_FRAME_LEN, 0);
+                    let message_len = transport
+                        .write_message(buf, &mut write_message_buffer[2..])
+                        .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
+                    write_message_buffer[..2].copy_from_slice(&(message_len as u16).to_le_bytes());
+                    write_message_buffer.truncate(2 + message_len);
+                    *state = WriteState::WriteMessage(0, payload_len);
                 }
-                WriteState::WriteMessage(message) => {
-                    let n = ready!(Pin::new(&mut inner).poll_write(cx, message))?;
-                    message.advance(n);
+                WriteState::WriteMessage(start, payload_len) => {
+                    let n = ready!(
+                        Pin::new(&mut inner).poll_write(cx, &write_message_buffer[*start..])
+                    )?;
+                    *start += n;
 
-                    if !message.has_remaining() {
+                    if *start == write_message_buffer.len() {
+                        let n = *payload_len;
                         *state = WriteState::Idle;
                         if let Some(waker) = this.write_clean_waker.take() {
                             waker.wake();
                         }
-                        return Poll::Ready(Ok(buf.len()));
+                        return Poll::Ready(Ok(n));
                     }
                 }
             }
@@ -157,13 +162,17 @@ where
         let state = this.read_state;
         let transport = this.transport;
 
+        let read_message_buffer = this.read_message_buffer;
+        let read_payload_buffer = this.read_payload_buffer;
+
         loop {
             match state {
                 ReadState::Idle => *state = ReadState::ReadLen(0, [0; 2]),
                 ReadState::ReadLen(read_len, mut buf) => {
                     if *read_len == 2 {
                         let message_len = u16::from_le_bytes(buf) as usize;
-                        *state = ReadState::ReadMessage(0, vec![0; message_len]);
+                        read_message_buffer.resize(message_len, 0);
+                        *state = ReadState::ReadMessage(0);
                     } else {
                         let mut read_buf = ReadBuf::new(&mut buf);
                         read_buf.advance(*read_len);
@@ -173,38 +182,34 @@ where
                         *state = ReadState::ReadLen(n, buf);
                     }
                 }
-                ReadState::ReadMessage(read_len, buf) => {
-                    if *read_len == buf.len() {
-                        let mut plaintext = BytesMut::new();
-                        plaintext.resize(buf.len() - TAG_LEN, 0);
-
+                ReadState::ReadMessage(start) => {
+                    if *start == read_message_buffer.len() {
+                        read_payload_buffer.resize(read_message_buffer.len(), 0);
                         let n = transport
-                            .read_message(buf, &mut plaintext)
+                            .read_message(read_message_buffer, read_payload_buffer)
                             .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
-
-                        plaintext.truncate(n);
-
-                        *state = ReadState::ServePayload(plaintext);
+                        read_payload_buffer.truncate(n);
+                        *state = ReadState::ServePayload(0);
                     } else {
-                        let mut read_buf = ReadBuf::new(buf);
-                        read_buf.advance(*read_len);
+                        let mut read_buf = ReadBuf::new(&mut read_message_buffer[*start..]);
 
                         ready!(Pin::new(&mut inner).poll_read(cx, &mut read_buf))?;
                         let n = read_buf.filled().len();
-                        *read_len += n;
+                        *start += n;
                     }
                 }
-                ReadState::ServePayload(buf) => {
+                ReadState::ServePayload(start) => {
                     let read_buf_remaining = read_buf.remaining();
-                    let buf_remaining = buf.remaining();
-
-                    if read_buf_remaining >= buf_remaining {
-                        read_buf.put_slice(buf);
+                    let buf_remaining = read_payload_buffer.len() - *start;
+                    if buf_remaining <= read_buf_remaining {
+                        read_buf.put_slice(read_payload_buffer);
                         *state = ReadState::Idle;
                     } else {
-                        read_buf.put_slice(&buf[..read_buf_remaining]);
-                        buf.advance(read_buf_remaining);
+                        read_buf
+                            .put_slice(&read_payload_buffer[*start..*start + read_buf_remaining]);
+                        *start += read_buf_remaining;
                     }
+
                     return Poll::Ready(Ok(()));
                 }
             }
@@ -241,7 +246,8 @@ mod tests {
                 .unwrap();
             let stream = TcpStream::connect("127.0.0.1:23333").await.unwrap();
             let mut stream = NoiseStream::handshake(stream, initiator).await.unwrap();
-            stream.write_all(b"hello world").await.unwrap();
+            let payload = (0..0x20000).map(|a| a as u8).collect::<Vec<_>>();
+            stream.write_all(&payload).await.unwrap();
         });
 
         let responder = Builder::new(PATTERN.parse().unwrap())
@@ -251,11 +257,12 @@ mod tests {
             .unwrap();
         let (stream, _) = listener.accept().await.unwrap();
         let mut stream = NoiseStream::handshake(stream, responder).await.unwrap();
-        let mut buf = vec![0; 0x1000];
-        let n = stream.read(&mut buf).await.unwrap();
+        let mut payload = vec![0; 0x20000];
+        stream.read_exact(&mut payload).await.unwrap();
 
-        let s = String::from_utf8(buf[..n].to_vec()).unwrap();
-        println!("{}", s);
+        payload.iter().enumerate().for_each(|(i, v)| {
+            assert_eq!(i as u8, *v);
+        });
 
         Ok(())
     }
