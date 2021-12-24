@@ -1,4 +1,5 @@
 use std::{
+    fmt::Debug,
     io::ErrorKind,
     pin::Pin,
     task::{Context, Poll, Waker},
@@ -34,6 +35,7 @@ enum WriteState {
 pub struct NoiseStream<T> {
     #[pin]
     inner: T,
+
     transport: TransportState,
     read_state: ReadState,
     write_state: WriteState,
@@ -43,6 +45,17 @@ pub struct NoiseStream<T> {
     read_payload_buffer: Vec<u8>,
 
     write_message_buffer: Vec<u8>,
+}
+
+impl<T: Debug> Debug for NoiseStream<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NoiseStream")
+            .field("inner", &self.inner)
+            .field("read_state", &self.read_state)
+            .field("write_state", &self.write_state)
+            .field("write_clean_waker", &self.write_clean_waker)
+            .finish()
+    }
 }
 
 impl<T> NoiseStream<T>
@@ -257,6 +270,7 @@ mod tests {
             .unwrap();
         let (stream, _) = listener.accept().await.unwrap();
         let mut stream = NoiseStream::handshake(stream, responder).await.unwrap();
+        println!("{:?}", stream);
         let mut payload = vec![0; 0x20000];
         stream.read_exact(&mut payload).await.unwrap();
 

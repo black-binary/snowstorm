@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use std::task::Context;
 use std::task::Poll;
 use std::time::Duration;
@@ -51,6 +52,14 @@ async fn send_to<P: PacketPoller<MetaInfo = M>, M: Clone>(
 pub struct NoisePacket<T> {
     inner: T,
     transport: StatelessTransportState,
+}
+
+impl<T: Debug> Debug for NoisePacket<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NoisePacket")
+            .field("inner", &self.inner)
+            .finish()
+    }
 }
 
 impl<T: PacketPoller> NoisePacket<T> {

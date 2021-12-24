@@ -22,6 +22,6 @@ pub enum Error {
     SnowError(#[from] snow::Error),
     #[error("io error")]
     IoError(#[from] std::io::Error),
-    #[error("handshake state error")]
+    #[error("handshake error")]
     HandshakeError(String),
 }
