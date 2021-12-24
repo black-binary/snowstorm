@@ -242,7 +242,7 @@ mod tests {
 
     #[tokio::test]
     async fn tcp() -> anyhow::Result<()> {
-        static PATTERN: &str = "Noise_NX_25519_ChaChaPoly_BLAKE2s";
+        static PATTERN: &str = "Noise_KK_25519_ChaChaPoly_BLAKE2s";
         let client_key = Builder::new(PATTERN.parse().unwrap())
             .generate_keypair()
             .unwrap();
