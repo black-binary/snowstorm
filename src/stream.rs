@@ -19,16 +19,18 @@ use crate::{Error, HANDSHAKE_FRAME_LEN, MAX_FRAME_LEN, TAG_LEN};
 
 #[derive(Debug)]
 enum ReadState {
+    ShuttingDown,
     Idle,
-    ReadLen(usize, [u8; 2]),
-    ReadMessage(usize),
-    ServePayload(usize),
+    ReadingLen(usize, [u8; 2]),
+    ReadingMessage(usize),
+    ServingPayload(usize),
 }
 
 #[derive(Debug)]
 enum WriteState {
+    ShuttingDown,
     Idle,
-    WriteMessage(usize, usize),
+    WritingMessage(usize, usize),
 }
 
 #[pin_project]
@@ -111,6 +113,9 @@ where
 
         loop {
             match state {
+                WriteState::ShuttingDown => {
+                    return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
+                }
                 WriteState::Idle => {
                     let payload_len = buf.len().min(MAX_FRAME_LEN - TAG_LEN);
                     let buf = &buf[..payload_len];
@@ -120,9 +125,9 @@ where
                         .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
                     write_message_buffer[..2].copy_from_slice(&(message_len as u16).to_le_bytes());
                     write_message_buffer.truncate(2 + message_len);
-                    *state = WriteState::WriteMessage(0, payload_len);
+                    *state = WriteState::WritingMessage(0, payload_len);
                 }
-                WriteState::WriteMessage(start, payload_len) => {
+                WriteState::WritingMessage(start, payload_len) => {
                     let n = ready!(
                         Pin::new(&mut inner).poll_write(cx, &write_message_buffer[*start..])
                     )?;
@@ -143,8 +148,11 @@ where
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
         let this = self.project();
-        if let WriteState::Idle = this.write_state {
-            return Poll::Ready(Ok(()));
+        match this.write_state {
+            WriteState::ShuttingDown | WriteState::Idle => {
+                return Poll::Ready(Ok(()));
+            }
+            _ => {}
         }
 
         *this.write_clean_waker = Some(cx.waker().clone());
@@ -156,7 +164,12 @@ where
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
-        self.project().inner.poll_shutdown(cx)
+        let this = self.project();
+        if let Some(waker) = this.write_clean_waker.take() {
+            waker.wake();
+        }
+        *this.write_state = WriteState::ShuttingDown;
+        this.inner.poll_shutdown(cx)
     }
 }
 
@@ -180,38 +193,52 @@ where
 
         loop {
             match state {
-                ReadState::Idle => *state = ReadState::ReadLen(0, [0; 2]),
-                ReadState::ReadLen(read_len, mut buf) => {
+                ReadState::ShuttingDown => {
+                    return Poll::Ready(Ok(()));
+                    //return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
+                }
+                ReadState::Idle => *state = ReadState::ReadingLen(0, [0; 2]),
+                ReadState::ReadingLen(read_len, mut buf) => {
                     if *read_len == 2 {
                         let message_len = u16::from_le_bytes(buf) as usize;
                         read_message_buffer.resize(message_len, 0);
-                        *state = ReadState::ReadMessage(0);
+                        *state = ReadState::ReadingMessage(0);
                     } else {
                         let mut read_buf = ReadBuf::new(&mut buf);
                         read_buf.advance(*read_len);
 
                         ready!(Pin::new(&mut inner).poll_read(cx, &mut read_buf))?;
                         let n = read_buf.filled().len();
-                        *state = ReadState::ReadLen(n, buf);
+                        if n == 0 {
+                            // EOF
+                            *state = ReadState::ShuttingDown;
+                        } else {
+                            *state = ReadState::ReadingLen(n, buf);
+                        }
                     }
                 }
-                ReadState::ReadMessage(start) => {
+                ReadState::ReadingMessage(start) => {
                     if *start == read_message_buffer.len() {
                         read_payload_buffer.resize(read_message_buffer.len(), 0);
                         let n = transport
                             .read_message(read_message_buffer, read_payload_buffer)
                             .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
                         read_payload_buffer.truncate(n);
-                        *state = ReadState::ServePayload(0);
+                        *state = ReadState::ServingPayload(0);
                     } else {
                         let mut read_buf = ReadBuf::new(&mut read_message_buffer[*start..]);
 
                         ready!(Pin::new(&mut inner).poll_read(cx, &mut read_buf))?;
                         let n = read_buf.filled().len();
-                        *start += n;
+                        if n == 0 {
+                            // EOF
+                            *state = ReadState::ShuttingDown;
+                        } else {
+                            *start += n;
+                        }
                     }
                 }
-                ReadState::ServePayload(start) => {
+                ReadState::ServingPayload(start) => {
                     let read_buf_remaining = read_buf.remaining();
                     let buf_remaining = read_payload_buffer.len() - *start;
                     if buf_remaining <= read_buf_remaining {
