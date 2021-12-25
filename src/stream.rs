@@ -195,7 +195,6 @@ where
             match state {
                 ReadState::ShuttingDown => {
                     return Poll::Ready(Ok(()));
-                    //return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
                 }
                 ReadState::Idle => *state = ReadState::ReadingLen(0, [0; 2]),
                 ReadState::ReadingLen(read_len, mut buf) => {

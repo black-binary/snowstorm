@@ -73,6 +73,10 @@ async fn echo_server<A: ToSocketAddrs>(bind_addr: A) -> Result<()> {
         tokio::spawn(async move {
             let mut buf = [0u8; 1024];
             while let Ok(n) = conn.read(&mut buf).await {
+                if n == 0 {
+                    let _ = conn.shutdown().await;
+                    return;
+                }
                 if conn.write_all(&buf[..n]).await.is_err() {
                     break;
                 }
@@ -84,7 +88,7 @@ async fn echo_server<A: ToSocketAddrs>(bind_addr: A) -> Result<()> {
 
 #[tokio::test]
 async fn test_relay() {
-    const ECHO_SERVER_BIND_ADDR: &str = "127.0.0.1:8080";
+    const ECHO_SERVER_BIND_ADDR: &str = "127.0.0.1:10010";
     const NOISE_SERVER_BIND_ADDR: &str = "127.0.0.1:12346";
 
     tokio::spawn(echo_server(ECHO_SERVER_BIND_ADDR));
@@ -114,7 +118,7 @@ async fn test_relay() {
         // Start handshaking
         // Should fail beacuse of a wrong remote public key
         let conn = NoiseStream::handshake(stream, responder).await.unwrap();
-        relay_to_tcp(ECHO_SERVER_BIND_ADDR, conn).await.unwrap();
+        let _ = relay_to_tcp(ECHO_SERVER_BIND_ADDR, conn).await;
     });
 
     let client = tokio::spawn(async move {
@@ -130,6 +134,10 @@ async fn test_relay() {
         // Start handshaking
         let mut conn = NoiseStream::handshake(stream, initiator).await.unwrap();
         conn.write_all("hello".as_bytes()).await.unwrap();
+        let mut buf = [0; 1024];
+        let n = conn.read(&mut buf).await.unwrap();
+        let s = String::from_utf8_lossy(&buf[..n]);
+        assert_eq!(s, "hello");
     });
 
     let (server_res, client_res) = tokio::join!(server, client);
