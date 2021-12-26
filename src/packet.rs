@@ -11,7 +11,6 @@ use snow::StatelessTransportState;
 use tokio::io::ReadBuf;
 
 use crate::Error;
-use crate::HANDSHAKE_FRAME_LEN;
 use crate::MAX_FRAME_LEN;
 
 pub trait PacketPoller {
@@ -78,12 +77,12 @@ impl<T: PacketPoller> NoisePacket<T> {
             }
 
             if state.is_my_turn() {
-                last_sent.resize(HANDSHAKE_FRAME_LEN, 0);
+                last_sent.resize(MAX_FRAME_LEN, 0);
                 let n = state.write_message(&[], &mut last_sent)?;
                 last_sent.truncate(n);
                 send_to(&inner, &last_sent, meta.clone()).await?;
             } else {
-                let mut recv_buf = vec![0; HANDSHAKE_FRAME_LEN];
+                let mut recv_buf = vec![0; MAX_FRAME_LEN];
 
                 let result =
                     tokio::time::timeout(timeout, async { recv_from(&inner, &mut recv_buf).await })
@@ -99,7 +98,7 @@ impl<T: PacketPoller> NoisePacket<T> {
                         if m != meta {
                             continue;
                         }
-                        let mut payload_buf = vec![0; HANDSHAKE_FRAME_LEN];
+                        let mut payload_buf = vec![0; MAX_FRAME_LEN];
                         state.read_message(&recv_buf[..n], &mut payload_buf)?;
                     }
                     Err(_) => {

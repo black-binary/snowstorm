@@ -13,8 +13,7 @@ pub use stream::NoiseStream;
 use thiserror::Error;
 
 const TAG_LEN: usize = 16;
-const MAX_FRAME_LEN: usize = 0xffff;
-const HANDSHAKE_FRAME_LEN: usize = 1024;
+const MAX_FRAME_LEN: usize = u16::MAX as usize;
 
 #[derive(Debug, Error)]
 pub enum Error {

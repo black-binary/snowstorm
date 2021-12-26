@@ -15,7 +15,7 @@ pub use snow::params::NoiseParams;
 pub use snow::Builder;
 pub use snow::Keypair;
 
-use crate::{Error, HANDSHAKE_FRAME_LEN, MAX_FRAME_LEN, TAG_LEN};
+use crate::{Error, MAX_FRAME_LEN, TAG_LEN};
 
 #[derive(Debug)]
 enum ReadState {
@@ -80,8 +80,8 @@ where
                 });
             }
 
-            let mut message = vec![0; HANDSHAKE_FRAME_LEN];
-            let mut payload = vec![0; HANDSHAKE_FRAME_LEN];
+            let mut message = vec![0; MAX_FRAME_LEN];
+            let mut payload = vec![0; MAX_FRAME_LEN];
 
             if state.is_my_turn() {
                 let len = state.write_message(&[], &mut message)?;
