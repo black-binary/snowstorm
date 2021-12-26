@@ -89,6 +89,9 @@ where
                 inner.write_all(&message[..len]).await?;
             } else {
                 let len = inner.read_u16_le().await? as usize;
+                if len >= message.len() {
+                    return HandshakeError("wrong length in handshake packet");
+                }
                 inner.read_exact(&mut message[..len]).await?;
                 state.read_message(&message[..len], &mut payload)?;
             }
