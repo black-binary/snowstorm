@@ -4,6 +4,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use bytes::Buf;
+use exponential_backoff::Backoff;
 use futures_util::future::poll_fn;
 use rand::Rng;
 use snow::HandshakeState;
@@ -58,8 +59,8 @@ impl<T: PacketPoller> NoiseSocket<T> {
     pub async fn handshake(
         inner: T,
         mut state: HandshakeState,
-        timeout: Duration,
-        mut max_retry: usize,
+        min_resend_interval: Duration,
+        max_retires: u32,
     ) -> Result<Self, Error> {
         let mut last_sent = vec![];
 
@@ -75,28 +76,40 @@ impl<T: PacketPoller> NoiseSocket<T> {
                 last_sent.truncate(n);
                 send(&inner, &last_sent).await?;
             } else {
+                let backoff = Backoff::new(max_retires, min_resend_interval, None);
                 let mut recv_buf = vec![0; MAX_MESSAGE_LEN];
+                let mut ok = false;
 
-                let result =
-                    tokio::time::timeout(timeout, async { recv(&inner, &mut recv_buf).await })
-                        .await;
-
-                if max_retry == 0 {
-                    return Err(Error::HandshakeError("handshake timeout".to_string()));
-                }
-
-                match result {
-                    Ok(r) => {
-                        let n = r?;
-                        let mut payload_buf = vec![0; MAX_MESSAGE_LEN];
-                        state.read_message(&recv_buf[..n], &mut payload_buf)?;
-                    }
-                    Err(_) => {
-                        max_retry -= 1;
-                        if !last_sent.is_empty() {
-                            send(&inner, &last_sent).await?;
+                for duration in backoff.into_iter() {
+                    let result =
+                        tokio::time::timeout(duration, async { recv(&inner, &mut recv_buf).await })
+                            .await;
+                    match result {
+                        Ok(r) => {
+                            let n = r?;
+                            let mut payload_buf = vec![0; MAX_MESSAGE_LEN];
+                            match state.read_message(&recv_buf[..n], &mut payload_buf) {
+                                Ok(_) => {
+                                    ok = true;
+                                    break;
+                                }
+                                Err(e) => {
+                                    log::warn!("recv invalid packet while handshaking {}", e);
+                                    continue;
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // Timeout, resend packet
+                            if !last_sent.is_empty() {
+                                send(&inner, &last_sent).await?;
+                            }
                         }
                     }
+                }
+
+                if !ok {
+                    return Err(Error::HandshakeError("handshake timeout".to_string()));
                 }
             }
         }
