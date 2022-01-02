@@ -11,7 +11,7 @@ use snow::StatelessTransportState;
 use tokio::io::ReadBuf;
 
 use crate::Error;
-use crate::MAX_FRAME_LEN;
+use crate::MAX_MESSAGE_LEN;
 
 pub trait PacketPoller {
     fn poll_send(&self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>>;
@@ -29,12 +29,12 @@ async fn send<P: PacketPoller>(p: &P, buf: &[u8]) -> std::io::Result<usize> {
     Ok(n)
 }
 
-pub struct NoisePacket<T> {
+pub struct NoiseSocket<T> {
     inner: T,
     transport: StatelessTransportState,
 }
 
-impl<T: Debug> Debug for NoisePacket<T> {
+impl<T: Debug> Debug for NoiseSocket<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NoisePacket")
             .field("inner", &self.inner)
@@ -42,7 +42,19 @@ impl<T: Debug> Debug for NoisePacket<T> {
     }
 }
 
-impl<T: PacketPoller> NoisePacket<T> {
+impl<T: PacketPoller> NoiseSocket<T> {
+    pub fn into_inner(self) -> T {
+        self.inner
+    }
+
+    pub fn state(&self) -> &StatelessTransportState {
+        &self.transport
+    }
+
+    pub fn state_mut(&mut self) -> &mut StatelessTransportState {
+        &mut self.transport
+    }
+
     pub async fn handshake(
         inner: T,
         mut state: HandshakeState,
@@ -50,6 +62,7 @@ impl<T: PacketPoller> NoisePacket<T> {
         mut max_retry: usize,
     ) -> Result<Self, Error> {
         let mut last_sent = vec![];
+
         loop {
             if state.is_handshake_finished() {
                 let transport = state.into_stateless_transport_mode()?;
@@ -57,12 +70,12 @@ impl<T: PacketPoller> NoisePacket<T> {
             }
 
             if state.is_my_turn() {
-                last_sent.resize(MAX_FRAME_LEN, 0);
+                last_sent.resize(MAX_MESSAGE_LEN, 0);
                 let n = state.write_message(&[], &mut last_sent)?;
                 last_sent.truncate(n);
                 send(&inner, &last_sent).await?;
             } else {
-                let mut recv_buf = vec![0; MAX_FRAME_LEN];
+                let mut recv_buf = vec![0; MAX_MESSAGE_LEN];
 
                 let result =
                     tokio::time::timeout(timeout, async { recv(&inner, &mut recv_buf).await })
@@ -75,7 +88,7 @@ impl<T: PacketPoller> NoisePacket<T> {
                 match result {
                     Ok(r) => {
                         let n = r?;
-                        let mut payload_buf = vec![0; MAX_FRAME_LEN];
+                        let mut payload_buf = vec![0; MAX_MESSAGE_LEN];
                         state.read_message(&recv_buf[..n], &mut payload_buf)?;
                     }
                     Err(_) => {
@@ -90,7 +103,7 @@ impl<T: PacketPoller> NoisePacket<T> {
     }
 
     pub async fn send(&self, buf: &[u8]) -> Result<usize, Error> {
-        let mut message = vec![0; 8 + MAX_FRAME_LEN];
+        let mut message = vec![0; 8 + MAX_MESSAGE_LEN];
         let nonce: u64 = rand::thread_rng().gen();
         message[..8].copy_from_slice(&nonce.to_le_bytes());
         let n = self
@@ -101,7 +114,7 @@ impl<T: PacketPoller> NoisePacket<T> {
     }
 
     pub async fn recv(&self, buf: &mut [u8]) -> Result<usize, Error> {
-        let mut recv_buf = vec![0; 8 + MAX_FRAME_LEN];
+        let mut recv_buf = vec![0; 8 + MAX_MESSAGE_LEN];
         let mut read_buf = ReadBuf::new(&mut recv_buf);
         poll_fn(|cx| self.inner.poll_recv(cx, &mut read_buf)).await?;
 
@@ -124,7 +137,7 @@ mod tests {
 
     use tokio::{io::ReadBuf, net::UdpSocket};
 
-    use crate::{NoisePacket, PacketPoller};
+    use crate::{NoiseSocket, PacketPoller};
 
     impl PacketPoller for UdpSocket {
         fn poll_send(&self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
@@ -158,13 +171,13 @@ mod tests {
             .unwrap();
 
         tokio::spawn(async move {
-            let a = NoisePacket::handshake(s, initiator, Duration::from_secs(1), 3)
+            let a = NoiseSocket::handshake(s, initiator, Duration::from_secs(1), 3)
                 .await
                 .unwrap();
             a.send(b"hello world!").await.unwrap();
         });
 
-        let b = NoisePacket::handshake(c, responder, Duration::from_secs(1), 3)
+        let b = NoiseSocket::handshake(c, responder, Duration::from_secs(1), 3)
             .await
             .unwrap();
         let mut buf = vec![0; 0x100];

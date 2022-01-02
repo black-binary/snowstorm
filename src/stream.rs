@@ -15,7 +15,7 @@ pub use snow::params::NoiseParams;
 pub use snow::Builder;
 pub use snow::Keypair;
 
-use crate::{Error, MAX_FRAME_LEN, TAG_LEN};
+use crate::{Error, MAX_MESSAGE_LEN, TAG_LEN};
 
 #[derive(Debug)]
 enum ReadState {
@@ -64,6 +64,18 @@ impl<T> NoiseStream<T>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
+    pub fn into_inner(self) -> T {
+        self.inner
+    }
+
+    pub fn state(&self) -> &TransportState {
+        &self.transport
+    }
+
+    pub fn state_mut(&mut self) -> &mut TransportState {
+        &mut self.transport
+    }
+
     pub async fn handshake(mut inner: T, mut state: HandshakeState) -> Result<Self, Error> {
         loop {
             if state.is_handshake_finished() {
@@ -80,8 +92,8 @@ where
                 });
             }
 
-            let mut message = vec![0; MAX_FRAME_LEN];
-            let mut payload = vec![0; MAX_FRAME_LEN];
+            let mut message = vec![0; MAX_MESSAGE_LEN];
+            let mut payload = vec![0; MAX_MESSAGE_LEN];
 
             if state.is_my_turn() {
                 let len = state.write_message(&[], &mut message)?;
@@ -117,9 +129,9 @@ where
                     return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
                 }
                 WriteState::Idle => {
-                    let payload_len = buf.len().min(MAX_FRAME_LEN - TAG_LEN);
+                    let payload_len = buf.len().min(MAX_MESSAGE_LEN - TAG_LEN);
                     let buf = &buf[..payload_len];
-                    write_message_buffer.resize(2 + MAX_FRAME_LEN, 0);
+                    write_message_buffer.resize(2 + MAX_MESSAGE_LEN, 0);
                     let message_len = transport
                         .write_message(buf, &mut write_message_buffer[2..])
                         .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
