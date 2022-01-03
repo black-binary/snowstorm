@@ -19,6 +19,10 @@ rand = "0.8"
 exponential-backoff = "1.1"
 log = "0.4"
 
+[features]
+ring-accelerated = ["snow/ring-accelerated"]
+libsodium-accelerated = ["snow/libsodium-accelerated"]
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
