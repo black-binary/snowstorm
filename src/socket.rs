@@ -1,3 +1,4 @@
+use std::cell::UnsafeCell;
 use std::fmt::Debug;
 use std::task::Context;
 use std::task::Poll;
@@ -6,7 +7,9 @@ use std::time::Duration;
 use bytes::Buf;
 use exponential_backoff::Backoff;
 use futures_util::future::poll_fn;
-use rand::Rng;
+use rand_chacha::rand_core::RngCore;
+use rand_chacha::rand_core::SeedableRng;
+use rand_chacha::ChaCha20Rng;
 use snow::HandshakeState;
 use snow::StatelessTransportState;
 use tokio::io::ReadBuf;
@@ -116,8 +119,13 @@ impl<T: PacketPoller> NoiseSocket<T> {
     }
 
     pub async fn send(&self, buf: &[u8]) -> Result<usize, Error> {
+        thread_local! {
+            static RNG: UnsafeCell<ChaCha20Rng> = UnsafeCell::new(rand_chacha::ChaCha20Rng::from_entropy());
+        };
+        let nonce: u64 = RNG.with(|rng| unsafe { (*rng.get()).next_u64() });
+
         let mut message = vec![0; 8 + MAX_MESSAGE_LEN];
-        let nonce: u64 = rand::thread_rng().gen();
+
         message[..8].copy_from_slice(&nonce.to_le_bytes());
         let n = self
             .transport
