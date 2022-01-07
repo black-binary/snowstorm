@@ -17,6 +17,8 @@ pub use snow::Keypair;
 
 use crate::{Error, MAX_MESSAGE_LEN, TAG_LEN};
 
+const LENGTH_FIELD_LEN: usize = std::mem::size_of::<u16>();
+
 #[derive(Debug)]
 enum ReadState {
     ShuttingDown,
@@ -91,9 +93,9 @@ where
                     read_state: ReadState::Idle,
                     write_state: WriteState::Idle,
                     write_clean_waker: None,
-                    read_message_buffer: vec![],
-                    read_payload_buffer: vec![],
-                    write_message_buffer: vec![],
+                    read_message_buffer: vec![0; MAX_MESSAGE_LEN],
+                    read_payload_buffer: vec![0; MAX_MESSAGE_LEN],
+                    write_message_buffer: vec![0; LENGTH_FIELD_LEN + MAX_MESSAGE_LEN],
                 });
             }
 
@@ -148,12 +150,18 @@ where
                 WriteState::Idle => {
                     let payload_len = buf.len().min(MAX_MESSAGE_LEN - TAG_LEN);
                     let buf = &buf[..payload_len];
-                    write_message_buffer.resize(2 + MAX_MESSAGE_LEN, 0);
+
+                    // Safety: This is safe because this buffer is initialized with length LENGTH_FIELD_LEN + MAX_MESSAGE_LEN
+                    unsafe {
+                        write_message_buffer.set_len(LENGTH_FIELD_LEN + MAX_MESSAGE_LEN);
+                    }
+
                     let message_len = transport
-                        .write_message(buf, &mut write_message_buffer[2..])
+                        .write_message(buf, &mut write_message_buffer[LENGTH_FIELD_LEN..])
                         .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
-                    write_message_buffer[..2].copy_from_slice(&(message_len as u16).to_le_bytes());
-                    write_message_buffer.truncate(2 + message_len);
+                    write_message_buffer[..LENGTH_FIELD_LEN]
+                        .copy_from_slice(&(message_len as u16).to_le_bytes());
+                    write_message_buffer.truncate(LENGTH_FIELD_LEN + message_len);
                     *state = WriteState::WritingMessage(0, payload_len);
                 }
                 WriteState::WritingMessage(start, payload_len) => {
@@ -225,11 +233,15 @@ where
                 ReadState::ShuttingDown => {
                     return Poll::Ready(Ok(()));
                 }
-                ReadState::Idle => *state = ReadState::ReadingLen(0, [0; 2]),
+                ReadState::Idle => *state = ReadState::ReadingLen(0, [0; LENGTH_FIELD_LEN]),
                 ReadState::ReadingLen(read_len, mut buf) => {
-                    if *read_len == 2 {
-                        let message_len = u16::from_le_bytes(buf) as usize;
-                        read_message_buffer.resize(message_len, 0);
+                    if *read_len == LENGTH_FIELD_LEN {
+                        let message_len = u16::from_le_bytes(buf);
+
+                        // Safety: This is safe because message_len <= MAX_MESSAGE_LEN
+                        unsafe {
+                            read_message_buffer.set_len(message_len as usize);
+                        }
                         *state = ReadState::ReadingMessage(0);
                     } else {
                         let mut read_buf = ReadBuf::new(&mut buf);
@@ -247,7 +259,11 @@ where
                 }
                 ReadState::ReadingMessage(start) => {
                     if *start == read_message_buffer.len() {
-                        read_payload_buffer.resize(read_message_buffer.len(), 0);
+                        // Safety: This is safe because this buffer is initialized with MAX_MESSAGE_LEN
+                        unsafe {
+                            read_payload_buffer.set_len(MAX_MESSAGE_LEN);
+                        }
+
                         let n = transport
                             .read_message(read_message_buffer, read_payload_buffer)
                             .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
