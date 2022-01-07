@@ -76,7 +76,12 @@ where
         &mut self.transport
     }
 
-    pub async fn handshake(mut inner: T, mut state: HandshakeState) -> Result<Self, Error> {
+    pub async fn handshake_with_verifier<F: FnOnce(&[u8]) -> bool>(
+        mut inner: T,
+        mut state: HandshakeState,
+        verifier: F,
+    ) -> Result<Self, Error> {
+        let mut f = Some(verifier);
         loop {
             if state.is_handshake_finished() {
                 let transport = state.into_transport_mode()?;
@@ -103,8 +108,20 @@ where
                 let len = inner.read_u16_le().await? as usize;
                 inner.read_exact(&mut message[..len]).await?;
                 state.read_message(&message[..len], &mut payload)?;
+                if let Some(pubkey) = state.get_remote_static() {
+                    if let Some(verifier) = f.take() {
+                        if !verifier(pubkey) {
+                            return Err(Error::HandshakeError("invalid public key".into()));
+                        }
+                    }
+                }
             }
         }
+    }
+
+    #[inline]
+    pub async fn handshake(inner: T, state: HandshakeState) -> Result<Self, Error> {
+        Self::handshake_with_verifier(inner, state, |_| true).await
     }
 }
 

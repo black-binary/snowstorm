@@ -16,6 +16,8 @@ use tokio::io::ReadBuf;
 use crate::Error;
 use crate::MAX_MESSAGE_LEN;
 
+const NONCE_LEN: usize = 8;
+
 pub trait PacketPoller {
     fn poll_send(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>>;
     fn poll_recv(
@@ -64,13 +66,26 @@ impl<T: PacketPoller> NoiseSocket<T> {
         &mut self.transport
     }
 
+    #[inline]
     pub async fn handshake(
+        inner: T,
+        state: HandshakeState,
+        min_resend_interval: Duration,
+        max_retires: u32,
+    ) -> Result<Self, Error> {
+        Self::handshake_with_verifier(inner, state, min_resend_interval, max_retires, |_| true)
+            .await
+    }
+
+    pub async fn handshake_with_verifier<F: FnOnce(&[u8]) -> bool>(
         mut inner: T,
         mut state: HandshakeState,
         min_resend_interval: Duration,
         max_retires: u32,
+        verifier: F,
     ) -> Result<Self, Error> {
         let mut last_sent = vec![];
+        let mut f = Some(verifier);
 
         loop {
             if state.is_handshake_finished() {
@@ -80,7 +95,7 @@ impl<T: PacketPoller> NoiseSocket<T> {
                     inner,
                     transport,
                     rng,
-                    send_buf: vec![],
+                    send_buf: vec![0; NONCE_LEN + MAX_MESSAGE_LEN],
                 });
             }
 
@@ -126,13 +141,20 @@ impl<T: PacketPoller> NoiseSocket<T> {
                 if !ok {
                     return Err(Error::HandshakeError("handshake timeout".to_string()));
                 }
+
+                if let Some(remote_pub) = state.get_remote_static() {
+                    if let Some(f) = f.take() {
+                        if !f(remote_pub) {
+                            return Err(Error::HandshakeError("invalid public key".to_string()));
+                        }
+                    }
+                }
             }
         }
     }
 
     pub async fn send(&mut self, buf: &[u8]) -> Result<usize, Error> {
         let nonce = self.rng.next_u64();
-        self.send_buf.resize(8 + MAX_MESSAGE_LEN, 0);
         self.send_buf[..8].copy_from_slice(&nonce.to_le_bytes());
         let n = self
             .transport
