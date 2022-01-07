@@ -16,7 +16,7 @@ use tokio::io::ReadBuf;
 use crate::Error;
 use crate::MAX_MESSAGE_LEN;
 
-const NONCE_LEN: usize = 8;
+const NONCE_LEN: usize = std::mem::size_of::<u64>();
 
 pub trait PacketPoller {
     fn poll_send(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>>;
@@ -43,6 +43,7 @@ pub struct NoiseSocket<T> {
     transport: StatelessTransportState,
     rng: ChaCha20Rng,
     send_buf: Vec<u8>,
+    recv_buf: Vec<u8>,
 }
 
 impl<T: Debug> Debug for NoiseSocket<T> {
@@ -96,6 +97,7 @@ impl<T: PacketPoller> NoiseSocket<T> {
                     transport,
                     rng,
                     send_buf: vec![0; NONCE_LEN + MAX_MESSAGE_LEN],
+                    recv_buf: vec![0; NONCE_LEN + MAX_MESSAGE_LEN],
                 });
             }
 
@@ -155,17 +157,16 @@ impl<T: PacketPoller> NoiseSocket<T> {
 
     pub async fn send(&mut self, buf: &[u8]) -> Result<usize, Error> {
         let nonce = self.rng.next_u64();
-        self.send_buf[..8].copy_from_slice(&nonce.to_le_bytes());
+        self.send_buf[..NONCE_LEN].copy_from_slice(&nonce.to_le_bytes());
         let n = self
             .transport
-            .write_message(nonce, buf, &mut self.send_buf[8..])?;
-        poll_fn(|cx| self.inner.poll_send(cx, &self.send_buf[..8 + n])).await?;
+            .write_message(nonce, buf, &mut self.send_buf[NONCE_LEN..])?;
+        poll_fn(|cx| self.inner.poll_send(cx, &self.send_buf[..NONCE_LEN + n])).await?;
         Ok(buf.len())
     }
 
     pub async fn recv(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
-        let mut recv_buf = vec![0; 8 + MAX_MESSAGE_LEN];
-        let mut read_buf = ReadBuf::new(&mut recv_buf);
+        let mut read_buf = ReadBuf::new(&mut self.recv_buf);
         poll_fn(|cx| self.inner.poll_recv(cx, &mut read_buf)).await?;
 
         let mut cur = read_buf.filled();
