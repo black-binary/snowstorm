@@ -23,4 +23,6 @@ pub enum Error {
     IoError(#[from] std::io::Error),
     #[error("handshake error")]
     HandshakeError(String),
+    #[error("invalid packet")]
+    InvalidPacket(String),
 }
