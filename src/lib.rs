@@ -17,12 +17,12 @@ const MAX_MESSAGE_LEN: usize = u16::MAX as usize;
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("noise protocol error from snow")]
+    #[error("noise protocol error from snow: {0}")]
     SnowError(#[from] snow::Error),
-    #[error("io error")]
+    #[error("io error: {0}")]
     IoError(#[from] std::io::Error),
-    #[error("handshake error")]
+    #[error("handshake error: {0}")]
     HandshakeError(String),
-    #[error("invalid packet")]
+    #[error("invalid packet: {0}")]
     InvalidPacket(String),
 }

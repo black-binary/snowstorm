@@ -93,10 +93,9 @@ impl<T: PacketPoller> NoiseSocket<T> {
     pub async fn handshake_with_verifier<F: FnOnce(&[u8]) -> bool>(
         mut inner: T,
         mut state: HandshakeState,
-        verifier: F,
+        pubkey_verfier: F,
     ) -> Result<Self, Error> {
-        let mut last_sent = vec![];
-        let mut f = Some(verifier);
+        let mut f = Some(pubkey_verfier);
 
         loop {
             if state.is_handshake_finished() {
@@ -118,10 +117,9 @@ impl<T: PacketPoller> NoiseSocket<T> {
             }
 
             if state.is_my_turn() {
-                last_sent.resize(MAX_MESSAGE_LEN, 0);
-                let n = state.write_message(&[], &mut last_sent)?;
-                last_sent.truncate(n);
-                send(&mut inner, &last_sent).await?;
+                let mut buf = vec![0; MAX_MESSAGE_LEN];
+                let n = state.write_message(&[], &mut buf)?;
+                send(&mut inner, &buf[..n]).await?;
             } else {
                 let mut recv_buf = vec![0; MAX_MESSAGE_LEN];
                 let n = recv(&mut inner, &mut recv_buf).await?;
