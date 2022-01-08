@@ -8,6 +8,7 @@ pub use snow::Keypair;
 
 pub use socket::NoiseSocket;
 pub use socket::PacketPoller;
+pub use socket::Verifier;
 pub use stream::NoiseStream;
 
 use thiserror::Error;
@@ -17,12 +18,16 @@ const MAX_MESSAGE_LEN: usize = u16::MAX as usize;
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("noise protocol error from snow: {0}")]
+    #[error("Snow error: {0}")]
     SnowError(#[from] snow::Error),
-    #[error("io error: {0}")]
+    #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
-    #[error("handshake error: {0}")]
+    #[error("Handshake error: {0}")]
     HandshakeError(String),
-    #[error("invalid packet: {0}")]
-    InvalidPacket(String),
+    #[error("Malformed packet: {0}")]
+    MalformedPacket(String),
+    #[error("Duplicated nonce: {0:08x}")]
+    DuplicatedNonce(u64),
+    #[error("Expired timestamp: {0}, now: {1}")]
+    ExpiredTimestamp(u32, u32),
 }

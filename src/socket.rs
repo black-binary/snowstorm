@@ -6,6 +6,7 @@ use std::task::Poll;
 use bytes::Buf;
 use futures_util::future::poll_fn;
 use rand::prelude::StdRng;
+use rand::RngCore;
 use rand::SeedableRng;
 use scalable_cuckoo_filter::DefaultHasher;
 use scalable_cuckoo_filter::ScalableCuckooFilter;
@@ -20,7 +21,7 @@ use crate::TAG_LEN;
 
 const NONCE_LEN: usize = std::mem::size_of::<u64>();
 const TIMESTAMP_LEN: usize = std::mem::size_of::<u32>();
-const EXPIRE_SECS: u32 = 60;
+const EXPIRE_SECS: u32 = 10;
 
 pub trait PacketPoller {
     fn poll_send(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>>;
@@ -56,6 +57,7 @@ pub struct NoiseSocket<T> {
     recv_payload_buf: Vec<u8>,
     filter: VecDeque<(u32, ScalableCuckooFilter<u64, DefaultHasher, StdRng>)>,
     peer_time: u32,
+    rng: StdRng,
 }
 
 impl<T: Debug> Debug for NoiseSocket<T> {
@@ -63,6 +65,29 @@ impl<T: Debug> Debug for NoiseSocket<T> {
         f.debug_struct("NoisePacket")
             .field("inner", &self.inner)
             .finish()
+    }
+}
+
+pub trait Verifier {
+    fn verify_public_key(&mut self, public_key: &[u8]) -> bool;
+    fn verify_timestamp(&mut self, timestamp: u32) -> bool;
+    fn verify_handshake_hash(&mut self, handshake_hash: &[u8]) -> bool;
+}
+
+impl Verifier for () {
+    fn verify_public_key(&mut self, public_key: &[u8]) -> bool {
+        let _ = public_key;
+        true
+    }
+
+    fn verify_timestamp(&mut self, timestamp: u32) -> bool {
+        let _ = timestamp;
+        true
+    }
+
+    fn verify_handshake_hash(&mut self, handshake_hash: &[u8]) -> bool {
+        let _ = handshake_hash;
+        true
     }
 }
 
@@ -79,24 +104,20 @@ impl<T: PacketPoller> NoiseSocket<T> {
         &mut self.transport
     }
 
-    #[inline]
-    pub async fn handshake(inner: T, state: HandshakeState) -> Result<Self, Error> {
-        Self::handshake_with_verifier(inner, state, |_| true).await
-    }
-
     fn new_filter() -> ScalableCuckooFilter<u64, DefaultHasher, StdRng> {
         ScalableCuckooFilterBuilder::new()
             .rng(StdRng::from_entropy())
+            .false_positive_probability(0.0001)
             .finish()
     }
 
-    pub async fn handshake_with_verifier<F: FnOnce(&[u8]) -> bool>(
+    pub async fn handshake_with_verifier<V: Verifier>(
         mut inner: T,
         mut state: HandshakeState,
-        pubkey_verfier: F,
+        verifier: &mut V,
     ) -> Result<Self, Error> {
-        let mut f = Some(pubkey_verfier);
-
+        let mut peer_time = 0;
+        let mut buf = vec![0; MAX_MESSAGE_LEN];
         loop {
             if state.is_handshake_finished() {
                 let transport = state.into_stateless_transport_mode()?;
@@ -112,26 +133,36 @@ impl<T: PacketPoller> NoiseSocket<T> {
                     send_payload_buf: vec![0; MAX_MESSAGE_LEN],
                     recv_message_buf: vec![0; NONCE_LEN + MAX_MESSAGE_LEN],
                     recv_payload_buf: vec![0; MAX_MESSAGE_LEN],
-                    peer_time: 0,
+                    peer_time,
+                    rng: StdRng::from_entropy(),
                 });
             }
 
             if state.is_my_turn() {
-                let mut buf = vec![0; MAX_MESSAGE_LEN];
-                let n = state.write_message(&[], &mut buf)?;
+                let n = state.write_message(&now().to_le_bytes(), &mut buf)?;
                 send(&mut inner, &buf[..n]).await?;
             } else {
-                let mut recv_buf = vec![0; MAX_MESSAGE_LEN];
-                let n = recv(&mut inner, &mut recv_buf).await?;
-                let mut payload_buf = vec![0; MAX_MESSAGE_LEN];
-                state.read_message(&recv_buf[..n], &mut payload_buf)?;
+                let n = recv(&mut inner, &mut buf).await?;
+                let mut timestamp = [0; TIMESTAMP_LEN];
+                let n = state.read_message(&buf[..n], &mut timestamp)?;
+                if n != 4 {
+                    return Err(Error::HandshakeError("message too short".into()));
+                }
 
-                if let Some(remote_pub) = state.get_remote_static() {
-                    if let Some(f) = f.take() {
-                        if !f(remote_pub) {
-                            return Err(Error::HandshakeError("invalid public key".to_string()));
-                        }
-                    }
+                peer_time = u32::from_le_bytes(timestamp);
+                if !verifier.verify_timestamp(peer_time) {
+                    return Err(Error::HandshakeError("invalid timestamp".into()));
+                }
+            }
+
+            let hash = state.get_handshake_hash();
+            if !verifier.verify_handshake_hash(hash) {
+                return Err(Error::HandshakeError("invalid handshake hash".into()));
+            }
+
+            if let Some(remote_pub) = state.get_remote_static() {
+                if !verifier.verify_public_key(remote_pub) {
+                    return Err(Error::HandshakeError("invalid public key".into()));
                 }
             }
         }
@@ -140,13 +171,13 @@ impl<T: PacketPoller> NoiseSocket<T> {
     pub async fn send(&mut self, buf: &[u8]) -> Result<usize, Error> {
         let len = buf.len();
         if len + TIMESTAMP_LEN + TAG_LEN > MAX_MESSAGE_LEN {
-            return Err(Error::InvalidPacket("message too long".into()));
+            return Err(Error::MalformedPacket("message too long".into()));
         }
 
         self.send_payload_buf[..TIMESTAMP_LEN].copy_from_slice(&now().to_le_bytes());
         self.send_payload_buf[TIMESTAMP_LEN..TIMESTAMP_LEN + len].copy_from_slice(buf);
 
-        let nonce: u64 = rand::random();
+        let nonce = self.rng.next_u64();
         self.send_message_buf[..NONCE_LEN].copy_from_slice(&nonce.to_le_bytes());
         let n = self.transport.write_message(
             nonce,
@@ -185,7 +216,7 @@ impl<T: PacketPoller> NoiseSocket<T> {
             .iter()
             .any(|(_, filter)| filter.contains(&nonce))
         {
-            return Err(Error::InvalidPacket(format!("duplicated nonce: {}", nonce)));
+            return Err(Error::DuplicatedNonce(nonce));
         }
 
         // Validate the length
@@ -193,16 +224,13 @@ impl<T: PacketPoller> NoiseSocket<T> {
             .transport
             .read_message(nonce, message, &mut self.recv_payload_buf)?;
         if n < TIMESTAMP_LEN {
-            return Err(Error::InvalidPacket("short packet".into()));
+            return Err(Error::MalformedPacket("short packet".into()));
         }
 
         // Validate the timestamp
         let ts = (&self.recv_payload_buf[..n]).get_u32_le();
         if self.peer_time > ts + EXPIRE_SECS {
-            return Err(Error::InvalidPacket(format!(
-                "expired packet {}, current: {}",
-                ts, self.peer_time
-            )));
+            return Err(Error::ExpiredTimestamp(ts, self.peer_time));
         }
 
         self.peer_time = self.peer_time.max(ts);
@@ -258,13 +286,17 @@ mod tests {
             .unwrap();
 
         tokio::spawn(async move {
-            let mut a = NoiseSocket::handshake(s, initiator).await.unwrap();
+            let mut a = NoiseSocket::handshake_with_verifier(s, initiator, &mut ())
+                .await
+                .unwrap();
             let buf = "hello world!".as_bytes().to_vec();
 
             a.send(&buf).await.unwrap();
         });
 
-        let mut b = NoiseSocket::handshake(c, responder).await.unwrap();
+        let mut b = NoiseSocket::handshake_with_verifier(c, responder, &mut ())
+            .await
+            .unwrap();
         let buf = b.recv().await.unwrap();
         let s = String::from_utf8_lossy(buf);
         println!("{}", s);
@@ -315,11 +347,15 @@ mod tests {
             .unwrap();
 
         let h = tokio::spawn(async move {
-            let a = NoiseSocket::handshake(a, initiator).await.unwrap();
+            let a = NoiseSocket::handshake_with_verifier(a, initiator, &mut ())
+                .await
+                .unwrap();
             a
         });
 
-        let mut b = NoiseSocket::handshake(b, responder).await.unwrap();
+        let mut b = NoiseSocket::handshake_with_verifier(b, responder, &mut ())
+            .await
+            .unwrap();
         let a = h.await.unwrap();
 
         let t = super::now();
