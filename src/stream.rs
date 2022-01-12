@@ -106,6 +106,7 @@ where
                 let len = state.write_message(&[], &mut message)?;
                 inner.write_u16_le(len as u16).await?;
                 inner.write_all(&message[..len]).await?;
+                inner.flush().await?;
             } else {
                 let len = inner.read_u16_le().await? as usize;
                 inner.read_exact(&mut message[..len]).await?;
