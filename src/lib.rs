@@ -1,4 +1,6 @@
+#[cfg(feature = "socket")]
 pub mod socket;
+#[cfg(feature = "stream")]
 pub mod stream;
 
 pub use snow;
@@ -6,9 +8,13 @@ pub use snow::params::NoiseParams;
 pub use snow::Builder;
 pub use snow::Keypair;
 
+#[cfg(feature = "socket")]
 pub use socket::NoiseSocket;
+#[cfg(feature = "socket")]
 pub use socket::PacketPoller;
+#[cfg(feature = "socket")]
 pub use socket::Verifier;
+#[cfg(feature = "stream")]
 pub use stream::NoiseStream;
 
 use thiserror::Error;
