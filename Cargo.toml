@@ -21,8 +21,11 @@ coarsetime = "0.1"
 rand = "0.8"
 
 [features]
+default = ["stream", "socket"]
 ring-accelerated = ["snow/ring-accelerated"]
 libsodium-accelerated = ["snow/libsodium-accelerated"]
+stream = []
+socket = ["tokio/rt"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
