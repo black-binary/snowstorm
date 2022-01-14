@@ -101,20 +101,29 @@ impl Verifier for () {
         true
     }
 }
+impl<T> NoiseSocket<T> {
+    pub fn get_inner(&self) -> &T {
+        &self.inner
+    }
 
-impl<T: PacketPoller> NoiseSocket<T> {
+    pub fn get_inner_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+
     pub fn into_inner(self) -> T {
         self.inner
     }
 
-    pub fn state(&self) -> &StatelessTransportState {
+    pub fn get_state(&self) -> &StatelessTransportState {
         &self.transport
     }
 
-    pub fn state_mut(&mut self) -> &mut StatelessTransportState {
+    pub fn get_state_mut(&mut self) -> &mut StatelessTransportState {
         &mut self.transport
     }
+}
 
+impl<T: PacketPoller> NoiseSocket<T> {
     fn new_filter() -> ScalableCuckooFilter<u64, DefaultHasher, StdRng> {
         ScalableCuckooFilterBuilder::new()
             .rng(StdRng::from_entropy())

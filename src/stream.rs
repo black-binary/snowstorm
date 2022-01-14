@@ -62,22 +62,32 @@ impl<T: Debug> Debug for NoiseStream<T> {
     }
 }
 
-impl<T> NoiseStream<T>
-where
-    T: AsyncRead + AsyncWrite + Unpin,
-{
+impl<T> NoiseStream<T> {
+    pub fn get_inner(&self) -> &T {
+        &self.inner
+    }
+
+    pub fn get_inner_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+
     pub fn into_inner(self) -> T {
         self.inner
     }
 
-    pub fn state(&self) -> &TransportState {
+    pub fn get_state(&self) -> &TransportState {
         &self.transport
     }
 
-    pub fn state_mut(&mut self) -> &mut TransportState {
+    pub fn get_state_mut(&mut self) -> &mut TransportState {
         &mut self.transport
     }
+}
 
+impl<T> NoiseStream<T>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
     pub async fn handshake_with_verifier<F: FnOnce(&[u8]) -> bool>(
         mut inner: T,
         mut state: HandshakeState,
