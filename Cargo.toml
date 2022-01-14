@@ -11,21 +11,21 @@ description = "A minimalistic encryption protocol"
 [dependencies]
 snow = "0.8"
 thiserror = "1"
-bytes = "1"
 futures-util = "0.3"
-tokio = { version = "1", features = ["io-util", "time"] }
-pin-project = "1"
+bytes = { version = "1", optional = true }
+tokio = { version = "1", features = ["io-util"] }
+pin-project = { version = "1", optional = true }
 log = "0.4"
-scalable_cuckoo_filter = "0.2"
-coarsetime = "0.1"
-rand = "0.8"
+scalable_cuckoo_filter = { version = "0.2", optional = true }
+coarsetime = { version = "0.1", optional = true }
+rand = { version = "0.8", optional = true }
 
 [features]
 default = ["stream", "socket"]
+stream = ["pin-project"]
+socket = ["tokio/rt", "tokio/time", "bytes", "scalable_cuckoo_filter", "coarsetime", "rand"]
 ring-accelerated = ["snow/ring-accelerated"]
 libsodium-accelerated = ["snow/libsodium-accelerated"]
-stream = []
-socket = ["tokio/rt"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
