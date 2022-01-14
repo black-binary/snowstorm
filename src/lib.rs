@@ -1,5 +1,7 @@
 #[cfg(feature = "socket")]
 pub mod socket;
+#[cfg(feature = "socket")]
+pub mod timer;
 #[cfg(feature = "stream")]
 pub mod stream;
 

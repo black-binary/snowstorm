@@ -1,11 +1,7 @@
 use std::collections::VecDeque;
 use std::fmt::Debug;
-use std::sync::atomic::AtomicU32;
-use std::sync::atomic::Ordering;
-use std::sync::Once;
 use std::task::Context;
 use std::task::Poll;
-use std::time::Duration;
 
 use bytes::Buf;
 use futures_util::future::poll_fn;
@@ -19,6 +15,8 @@ use snow::HandshakeState;
 use snow::StatelessTransportState;
 use tokio::io::ReadBuf;
 
+use crate::timer;
+use crate::timer::timestamp;
 use crate::Error;
 use crate::MAX_MESSAGE_LEN;
 use crate::TAG_LEN;
@@ -45,18 +43,6 @@ async fn recv<P: PacketPoller>(p: &mut P, buf: &mut [u8]) -> std::io::Result<usi
 async fn send<P: PacketPoller>(p: &mut P, buf: &[u8]) -> std::io::Result<usize> {
     let n = poll_fn(|cx| p.poll_send(cx, buf)).await?;
     Ok(n)
-}
-
-static TIMESTAMP: AtomicU32 = AtomicU32::new(0);
-static TIMESTAMP_WORKER: Once = Once::new();
-
-#[inline(always)]
-fn timestamp() -> u32 {
-    TIMESTAMP.load(Ordering::Relaxed)
-}
-
-fn timestamp_realtime() -> u32 {
-    coarsetime::Clock::now_since_epoch().as_secs() as u32
 }
 
 pub struct NoiseSocket<T> {
@@ -124,6 +110,7 @@ impl<T> NoiseSocket<T> {
 }
 
 impl<T: PacketPoller> NoiseSocket<T> {
+    #[inline]
     fn new_filter() -> ScalableCuckooFilter<u64, DefaultHasher, StdRng> {
         ScalableCuckooFilterBuilder::new()
             .rng(StdRng::from_entropy())
@@ -136,16 +123,8 @@ impl<T: PacketPoller> NoiseSocket<T> {
         mut state: HandshakeState,
         verifier: &mut V,
     ) -> Result<Self, Error> {
-        TIMESTAMP_WORKER.call_once(|| {
-            TIMESTAMP.store(timestamp_realtime(), Ordering::Relaxed);
-            tokio::spawn(async {
-                let interval = Duration::from_millis(200);
-                loop {
-                    TIMESTAMP.store(timestamp_realtime(), Ordering::Relaxed);
-                    tokio::time::sleep(interval).await;
-                }
-            });
-        });
+        timer::init();
+
         let mut peer_time = 0;
         let mut buf = vec![0; MAX_MESSAGE_LEN];
         loop {
@@ -169,7 +148,8 @@ impl<T: PacketPoller> NoiseSocket<T> {
             }
 
             if state.is_my_turn() {
-                let n = state.write_message(&timestamp().to_le_bytes(), &mut buf)?;
+                let n =
+                    state.write_message(&(timer::timestamp() as u32).to_le_bytes(), &mut buf)?;
                 send(&mut inner, &buf[..n]).await?;
             } else {
                 let n = recv(&mut inner, &mut buf).await?;
@@ -204,7 +184,7 @@ impl<T: PacketPoller> NoiseSocket<T> {
             return Err(Error::MalformedPacket("message too long".into()));
         }
 
-        self.send_payload_buf[..TIMESTAMP_LEN].copy_from_slice(&timestamp().to_le_bytes());
+        self.send_payload_buf[..TIMESTAMP_LEN].copy_from_slice(&(timestamp() as u32).to_le_bytes());
         self.send_payload_buf[TIMESTAMP_LEN..TIMESTAMP_LEN + len].copy_from_slice(buf);
 
         let nonce = self.rng.next_u64();
@@ -282,7 +262,7 @@ mod tests {
         sync::mpsc::{channel, Receiver, Sender},
     };
 
-    use crate::{NoiseSocket, PacketPoller};
+    use crate::{timer::timestamp, NoiseSocket, PacketPoller};
 
     impl PacketPoller for UdpSocket {
         fn poll_send(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
@@ -365,6 +345,7 @@ mod tests {
 
     #[tokio::test]
     async fn attack() {
+        crate::timer::init();
         static PATTERN: &str = "Noise_NN_25519_ChaChaPoly_BLAKE2s";
         let (a, b) = TestChannel::new_pair();
         let a_tx = a.tx.clone();
@@ -388,7 +369,7 @@ mod tests {
             .unwrap();
         let a = h.await.unwrap();
 
-        let t = super::timestamp();
+        let t = timestamp() as u32;
 
         // Replay
         for _ in 0..2 {
