@@ -16,13 +16,12 @@ bytes = { version = "1", optional = true }
 tokio = { version = "1", features = ["io-util"] }
 pin-project = { version = "1", optional = true }
 log = "0.4"
-scalable_cuckoo_filter = { version = "0.2", optional = true }
 rand = { version = "0.8", optional = true }
 
 [features]
 default = ["stream", "socket"]
 stream = ["pin-project"]
-socket = ["tokio/rt", "tokio/time", "bytes", "scalable_cuckoo_filter", "rand"]
+socket = ["tokio/rt", "tokio/time", "bytes", "rand"]
 ring-accelerated = ["snow/ring-accelerated"]
 libsodium-accelerated = ["snow/libsodium-accelerated"]
 

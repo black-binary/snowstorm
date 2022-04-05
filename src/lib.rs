@@ -1,9 +1,9 @@
 #[cfg(feature = "socket")]
 pub mod socket;
-#[cfg(feature = "socket")]
-pub mod timer;
 #[cfg(feature = "stream")]
 pub mod stream;
+#[cfg(feature = "socket")]
+pub mod timer;
 
 pub use snow;
 pub use snow::params::NoiseParams;
@@ -34,8 +34,8 @@ pub enum Error {
     HandshakeError(String),
     #[error("Malformed packet: {0}")]
     MalformedPacket(String),
-    #[error("Duplicated nonce: {0:08x}")]
-    DuplicatedNonce(u64),
-    #[error("Expired timestamp: {0}, now: {1}")]
-    ExpiredTimestamp(u32, u32),
+    #[error("Invalid nonce: {0:08x}")]
+    InvalidNonce(u64),
+    #[error("Invalid timestamp: {0}")]
+    InvalidTimestamp(u32),
 }

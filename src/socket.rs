@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::task::Context;
 use std::task::Poll;
@@ -8,9 +7,6 @@ use futures_util::future::poll_fn;
 use rand::prelude::StdRng;
 use rand::RngCore;
 use rand::SeedableRng;
-use scalable_cuckoo_filter::DefaultHasher;
-use scalable_cuckoo_filter::ScalableCuckooFilter;
-use scalable_cuckoo_filter::ScalableCuckooFilterBuilder;
 use snow::HandshakeState;
 use snow::StatelessTransportState;
 use tokio::io::ReadBuf;
@@ -23,7 +19,6 @@ use crate::TAG_LEN;
 
 const NONCE_LEN: usize = std::mem::size_of::<u64>();
 const TIMESTAMP_LEN: usize = std::mem::size_of::<u32>();
-const EXPIRE_SECS: u32 = 10;
 
 pub trait PacketPoller {
     fn poll_send(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>>;
@@ -32,6 +27,21 @@ pub trait PacketPoller {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>>;
+}
+
+pub trait NonceFilter {
+    fn check_nonce(&self, timestamp: u32, nonce: u64) -> Result<(), crate::Error>;
+    fn add_nonce(&mut self, timestamp: u32, nonce: u64);
+}
+
+impl NonceFilter for () {
+    #[inline]
+    fn check_nonce(&self, _: u32, _: u64) -> Result<(), crate::Error> {
+        Ok(())
+    }
+
+    #[inline]
+    fn add_nonce(&mut self, _: u32, _: u64) {}
 }
 
 async fn recv<P: PacketPoller>(p: &mut P, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -45,22 +55,22 @@ async fn send<P: PacketPoller>(p: &mut P, buf: &[u8]) -> std::io::Result<usize> 
     Ok(n)
 }
 
-pub struct NoiseSocket<T> {
+pub struct NoiseSocket<T, F> {
     inner: T,
     transport: StatelessTransportState,
     send_message_buf: Vec<u8>,
     send_payload_buf: Vec<u8>,
     recv_message_buf: Vec<u8>,
     recv_payload_buf: Vec<u8>,
-    filter: VecDeque<(u32, ScalableCuckooFilter<u64, DefaultHasher, StdRng>)>,
-    peer_time: u32,
+    filter: F,
     rng: StdRng,
 }
 
-impl<T: Debug> Debug for NoiseSocket<T> {
+impl<T: Debug, F: Debug> Debug for NoiseSocket<T, F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NoisePacket")
             .field("inner", &self.inner)
+            .field("filter", &self.filter)
             .finish()
     }
 }
@@ -87,7 +97,7 @@ impl Verifier for () {
         true
     }
 }
-impl<T> NoiseSocket<T> {
+impl<T, F> NoiseSocket<T, F> {
     pub fn get_inner(&self) -> &T {
         &self.inner
     }
@@ -109,40 +119,28 @@ impl<T> NoiseSocket<T> {
     }
 }
 
-impl<T: PacketPoller> NoiseSocket<T> {
-    #[inline]
-    fn new_filter() -> ScalableCuckooFilter<u64, DefaultHasher, StdRng> {
-        ScalableCuckooFilterBuilder::new()
-            .rng(StdRng::from_entropy())
-            .false_positive_probability(0.0001)
-            .finish()
-    }
-
+impl<T: PacketPoller, F: NonceFilter> NoiseSocket<T, F> {
     pub async fn handshake_with_verifier<V: Verifier>(
         mut inner: T,
         mut state: HandshakeState,
         verifier: &mut V,
+        filter: F,
     ) -> Result<Self, Error> {
         timer::init();
 
-        let mut peer_time = 0;
         let mut buf = vec![0; MAX_MESSAGE_LEN];
         loop {
             if state.is_handshake_finished() {
                 let transport = state.into_stateless_transport_mode()?;
-                let mut filter = VecDeque::new();
-                filter.push_back((0, Self::new_filter()));
-                filter.push_back((0, Self::new_filter()));
 
                 return Ok(Self {
                     inner,
                     transport,
-                    filter,
                     send_message_buf: vec![0; NONCE_LEN + MAX_MESSAGE_LEN],
                     send_payload_buf: vec![0; MAX_MESSAGE_LEN],
                     recv_message_buf: vec![0; NONCE_LEN + MAX_MESSAGE_LEN],
                     recv_payload_buf: vec![0; MAX_MESSAGE_LEN],
-                    peer_time,
+                    filter,
                     rng: StdRng::from_entropy(),
                 });
             }
@@ -159,7 +157,7 @@ impl<T: PacketPoller> NoiseSocket<T> {
                     return Err(Error::HandshakeError("message too short".into()));
                 }
 
-                peer_time = u32::from_le_bytes(timestamp);
+                let peer_time = u32::from_le_bytes(timestamp);
                 if !verifier.verify_timestamp(peer_time) {
                     return Err(Error::HandshakeError("invalid timestamp".into()));
                 }
@@ -204,14 +202,6 @@ impl<T: PacketPoller> NoiseSocket<T> {
         Ok(len)
     }
 
-    fn add_nonce(&mut self, nonce: u64) {
-        if self.peer_time > self.filter.front().unwrap().0 + EXPIRE_SECS * 2 {
-            self.filter.pop_front();
-            self.filter.push_back((self.peer_time, Self::new_filter()));
-        }
-        self.filter.back_mut().unwrap().1.insert(&nonce);
-    }
-
     pub async fn recv(&mut self) -> Result<&[u8], Error> {
         let mut read_buf = ReadBuf::new(&mut self.recv_message_buf);
         poll_fn(|cx| self.inner.poll_recv(cx, &mut read_buf)).await?;
@@ -219,15 +209,6 @@ impl<T: PacketPoller> NoiseSocket<T> {
         let mut cur = read_buf.filled();
         let nonce = cur.get_u64_le();
         let message = cur;
-
-        // Check if this nonce is duplicated
-        if self
-            .filter
-            .iter()
-            .any(|(_, filter)| filter.contains(&nonce))
-        {
-            return Err(Error::DuplicatedNonce(nonce));
-        }
 
         // Validate the length
         let n = self
@@ -239,12 +220,9 @@ impl<T: PacketPoller> NoiseSocket<T> {
 
         // Validate the timestamp
         let ts = (&self.recv_payload_buf[..n]).get_u32_le();
-        if self.peer_time > ts + EXPIRE_SECS {
-            return Err(Error::ExpiredTimestamp(ts, self.peer_time));
-        }
 
-        self.peer_time = self.peer_time.max(ts);
-        self.add_nonce(nonce);
+        // Check if this nonce is duplicated
+        self.filter.check_nonce(ts, nonce)?;
 
         Ok(&self.recv_payload_buf[TIMESTAMP_LEN..n])
     }
@@ -255,14 +233,13 @@ mod tests {
     use std::task::{Context, Poll};
 
     use futures_util::ready;
-    use rand::Rng;
     use tokio::{
         io::ReadBuf,
         net::UdpSocket,
-        sync::mpsc::{channel, Receiver, Sender},
+        sync::mpsc::{Receiver, Sender},
     };
 
-    use crate::{timer::timestamp, NoiseSocket, PacketPoller};
+    use crate::{NoiseSocket, PacketPoller};
 
     impl PacketPoller for UdpSocket {
         fn poll_send(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
@@ -296,7 +273,7 @@ mod tests {
             .unwrap();
 
         tokio::spawn(async move {
-            let mut a = NoiseSocket::handshake_with_verifier(s, initiator, &mut ())
+            let mut a = NoiseSocket::handshake_with_verifier(s, initiator, &mut (), ())
                 .await
                 .unwrap();
             let buf = "hello world!".as_bytes().to_vec();
@@ -304,7 +281,7 @@ mod tests {
             a.send(&buf).await.unwrap();
         });
 
-        let mut b = NoiseSocket::handshake_with_verifier(c, responder, &mut ())
+        let mut b = NoiseSocket::handshake_with_verifier(c, responder, &mut (), ())
             .await
             .unwrap();
         let buf = b.recv().await.unwrap();
@@ -332,101 +309,6 @@ mod tests {
                 buf.put_slice(&c);
             }
             Poll::Ready(Ok(()))
-        }
-    }
-
-    impl TestChannel {
-        fn new_pair() -> (Self, Self) {
-            let (tx1, rx1) = channel(0x100);
-            let (tx2, rx2) = channel(0x100);
-            (Self { tx: tx1, rx: rx2 }, Self { tx: tx2, rx: rx1 })
-        }
-    }
-
-    #[tokio::test]
-    async fn attack() {
-        crate::timer::init();
-        static PATTERN: &str = "Noise_NN_25519_ChaChaPoly_BLAKE2s";
-        let (a, b) = TestChannel::new_pair();
-        let a_tx = a.tx.clone();
-
-        let initiator = snow::Builder::new(PATTERN.parse().unwrap())
-            .build_initiator()
-            .unwrap();
-        let responder = snow::Builder::new(PATTERN.parse().unwrap())
-            .build_responder()
-            .unwrap();
-
-        let h = tokio::spawn(async move {
-            let a = NoiseSocket::handshake_with_verifier(a, initiator, &mut ())
-                .await
-                .unwrap();
-            a
-        });
-
-        let mut b = NoiseSocket::handshake_with_verifier(b, responder, &mut ())
-            .await
-            .unwrap();
-        let a = h.await.unwrap();
-
-        let t = timestamp() as u32;
-
-        // Replay
-        for _ in 0..2 {
-            let mut buf = vec![0; 1000];
-            buf[0] = 233;
-            let n = a
-                .transport
-                .write_message(233, &t.to_le_bytes(), &mut buf[8..])
-                .unwrap();
-            a_tx.send(buf[..8 + n].to_vec()).await.unwrap();
-        }
-
-        b.recv().await.unwrap();
-        println!("{:?}", b.recv().await.unwrap_err());
-
-        // Malformed
-        a_tx.send(b"11111111111111111111111".to_vec())
-            .await
-            .unwrap();
-        println!("{}", b.recv().await.unwrap_err());
-
-        // Short
-        let mut buf = vec![0; 1000];
-        buf[0] = 1;
-        let n = a.transport.write_message(1, b"123", &mut buf[8..]).unwrap();
-        a_tx.send(buf[..8 + n].to_vec()).await.unwrap();
-        println!("{:?}", b.recv().await.unwrap_err());
-
-        // Replay expired
-        buf[0] = 1;
-        let n = a
-            .transport
-            .write_message(1, &(t - 1000).to_le_bytes(), &mut buf[8..])
-            .unwrap();
-        a_tx.send(buf[..8 + n].to_vec()).await.unwrap();
-        println!("{:?}", b.recv().await.unwrap_err());
-
-        // Update
-        let packets = (0..100)
-            .map(|_| {
-                let mut buf = vec![0; 1000];
-                let delta = rand::thread_rng().gen_range(0..super::EXPIRE_SECS / 2);
-                let t = t + delta;
-                let nonce = rand::random();
-                let n = a
-                    .transport
-                    .write_message(nonce, &t.to_le_bytes(), &mut buf[8..])
-                    .unwrap();
-                buf[..8].copy_from_slice(&nonce.to_le_bytes());
-
-                buf[..n + 8].to_vec()
-            })
-            .collect::<Vec<_>>();
-
-        for p in packets.into_iter() {
-            a_tx.send(p).await.unwrap();
-            b.recv().await.unwrap();
         }
     }
 }
