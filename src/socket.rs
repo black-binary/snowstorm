@@ -20,13 +20,11 @@ use crate::TAG_LEN;
 const NONCE_LEN: usize = std::mem::size_of::<u64>();
 const TIMESTAMP_LEN: usize = std::mem::size_of::<u32>();
 
+type IoResult<T> = std::io::Result<T>;
+
 pub trait PacketPoller {
-    fn poll_send(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>>;
-    fn poll_recv(
-        &mut self,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>>;
+    fn poll_send(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<IoResult<()>>;
+    fn poll_recv(&mut self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<IoResult<()>>;
 }
 
 pub trait NonceFilter {
@@ -44,20 +42,20 @@ impl NonceFilter for () {
     fn add_nonce(&mut self, _: u32, _: u64) {}
 }
 
-async fn recv<P: PacketPoller>(p: &mut P, buf: &mut [u8]) -> std::io::Result<usize> {
+async fn recv<P: PacketPoller>(p: &mut P, buf: &mut [u8]) -> IoResult<usize> {
     let mut read_buf = ReadBuf::new(buf);
     poll_fn(|cx| p.poll_recv(cx, &mut read_buf)).await?;
     Ok(read_buf.filled().len())
 }
 
-async fn send<P: PacketPoller>(p: &mut P, buf: &[u8]) -> std::io::Result<usize> {
-    let n = poll_fn(|cx| p.poll_send(cx, buf)).await?;
-    Ok(n)
+async fn send<P: PacketPoller>(p: &mut P, buf: &[u8]) -> IoResult<()> {
+    poll_fn(|cx| p.poll_send(cx, buf)).await?;
+    Ok(())
 }
 
 pub struct NoiseSocket<T, F> {
     inner: T,
-    transport: StatelessTransportState,
+    state: StatelessTransportState,
     send_message_buf: Vec<u8>,
     send_payload_buf: Vec<u8>,
     recv_message_buf: Vec<u8>,
@@ -82,18 +80,15 @@ pub trait Verifier {
 }
 
 impl Verifier for () {
-    fn verify_public_key(&mut self, public_key: &[u8]) -> bool {
-        let _ = public_key;
+    fn verify_public_key(&mut self, _: &[u8]) -> bool {
         true
     }
 
-    fn verify_timestamp(&mut self, timestamp: u32) -> bool {
-        let _ = timestamp;
+    fn verify_timestamp(&mut self, _: u32) -> bool {
         true
     }
 
-    fn verify_handshake_hash(&mut self, handshake_hash: &[u8]) -> bool {
-        let _ = handshake_hash;
+    fn verify_handshake_hash(&mut self, _: &[u8]) -> bool {
         true
     }
 }
@@ -111,11 +106,11 @@ impl<T, F> NoiseSocket<T, F> {
     }
 
     pub fn get_state(&self) -> &StatelessTransportState {
-        &self.transport
+        &self.state
     }
 
     pub fn get_state_mut(&mut self) -> &mut StatelessTransportState {
-        &mut self.transport
+        &mut self.state
     }
 }
 
@@ -131,11 +126,11 @@ impl<T: PacketPoller, F: NonceFilter> NoiseSocket<T, F> {
         let mut buf = vec![0; MAX_MESSAGE_LEN];
         loop {
             if state.is_handshake_finished() {
-                let transport = state.into_stateless_transport_mode()?;
+                let state = state.into_stateless_transport_mode()?;
 
                 return Ok(Self {
                     inner,
-                    transport,
+                    state,
                     send_message_buf: vec![0; NONCE_LEN + MAX_MESSAGE_LEN],
                     send_payload_buf: vec![0; MAX_MESSAGE_LEN],
                     recv_message_buf: vec![0; NONCE_LEN + MAX_MESSAGE_LEN],
@@ -187,7 +182,7 @@ impl<T: PacketPoller, F: NonceFilter> NoiseSocket<T, F> {
 
         let nonce = self.rng.next_u64();
         self.send_message_buf[..NONCE_LEN].copy_from_slice(&nonce.to_le_bytes());
-        let n = self.transport.write_message(
+        let n = self.state.write_message(
             nonce,
             &self.send_payload_buf[..len + TIMESTAMP_LEN],
             &mut self.send_message_buf[NONCE_LEN..],
@@ -212,7 +207,7 @@ impl<T: PacketPoller, F: NonceFilter> NoiseSocket<T, F> {
 
         // Validate the length
         let n = self
-            .transport
+            .state
             .read_message(nonce, message, &mut self.recv_payload_buf)?;
         if n < TIMESTAMP_LEN {
             return Err(Error::MalformedPacket("short packet".into()));
@@ -241,15 +236,13 @@ mod tests {
 
     use crate::{NoiseSocket, PacketPoller};
 
+    use super::IoResult;
+
     impl PacketPoller for UdpSocket {
-        fn poll_send(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
-            UdpSocket::poll_send(self, cx, buf)
+        fn poll_send(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<IoResult<()>> {
+            UdpSocket::poll_send(self, cx, buf).map_ok(|_| ())
         }
-        fn poll_recv(
-            &mut self,
-            cx: &mut Context<'_>,
-            buf: &mut ReadBuf<'_>,
-        ) -> Poll<std::io::Result<()>> {
+        fn poll_recv(&mut self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<IoResult<()>> {
             UdpSocket::poll_recv(self, cx, buf)
         }
     }
@@ -295,15 +288,11 @@ mod tests {
     }
 
     impl PacketPoller for TestChannel {
-        fn poll_send(&mut self, _: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+        fn poll_send(&mut self, _: &mut Context<'_>, buf: &[u8]) -> Poll<IoResult<()>> {
             self.tx.try_send(buf.to_vec()).unwrap();
-            Poll::Ready(Ok(buf.len()))
+            Poll::Ready(Ok(()))
         }
-        fn poll_recv(
-            &mut self,
-            cx: &mut Context<'_>,
-            buf: &mut ReadBuf<'_>,
-        ) -> Poll<std::io::Result<()>> {
+        fn poll_recv(&mut self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<IoResult<()>> {
             let v = ready!(self.rx.poll_recv(cx));
             if let Some(c) = v {
                 buf.put_slice(&c);
