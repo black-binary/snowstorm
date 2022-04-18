@@ -23,7 +23,7 @@ async fn server(local_private_key: &[u8], remote_public_key: &[u8]) -> Result<()
             let mut stream = NoiseStream::handshake(stream, responder).await?;
             loop {
                 let mut buf = [0; 1024];
-                stream.read(&mut buf).await?;
+                let _ = stream.read(&mut buf).await?;
                 stream.write_all(&buf).await?
             }
         });

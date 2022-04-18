@@ -15,7 +15,7 @@ pub use snow::params::NoiseParams;
 pub use snow::Builder;
 pub use snow::Keypair;
 
-use crate::{Error, MAX_MESSAGE_LEN, TAG_LEN};
+use crate::{SnowstormError, MAX_MESSAGE_LEN, TAG_LEN};
 
 const LENGTH_FIELD_LEN: usize = std::mem::size_of::<u16>();
 
@@ -92,7 +92,7 @@ where
         mut inner: T,
         mut state: HandshakeState,
         verifier: F,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, SnowstormError> {
         let mut f = Some(verifier);
         loop {
             if state.is_handshake_finished() {
@@ -124,7 +124,9 @@ where
                 if let Some(pubkey) = state.get_remote_static() {
                     if let Some(verifier) = f.take() {
                         if !verifier(pubkey) {
-                            return Err(Error::HandshakeError("invalid public key".into()));
+                            return Err(SnowstormError::HandshakeError(
+                                "invalid public key".into(),
+                            ));
                         }
                     }
                 }
@@ -133,7 +135,7 @@ where
     }
 
     #[inline]
-    pub async fn handshake(inner: T, state: HandshakeState) -> Result<Self, Error> {
+    pub async fn handshake(inner: T, state: HandshakeState) -> Result<Self, SnowstormError> {
         Self::handshake_with_verifier(inner, state, |_| true).await
     }
 }

@@ -13,7 +13,8 @@ use tokio::io::ReadBuf;
 
 use crate::timer;
 use crate::timer::timestamp;
-use crate::Error;
+use crate::SnowstormError;
+use crate::SnowstormResult;
 use crate::MAX_MESSAGE_LEN;
 use crate::TAG_LEN;
 
@@ -27,19 +28,34 @@ pub trait PacketPoller {
     fn poll_recv(&mut self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<IoResult<()>>;
 }
 
-pub trait NonceFilter {
-    fn check_nonce(&self, timestamp: u32, nonce: u64) -> Result<(), crate::Error>;
-    fn add_nonce(&mut self, timestamp: u32, nonce: u64);
+pub trait PacketVerifier {
+    fn verify_packet(&mut self, timestamp: u32, nonce: u64) -> SnowstormResult<()>;
 }
 
-impl NonceFilter for () {
-    #[inline]
-    fn check_nonce(&self, _: u32, _: u64) -> Result<(), crate::Error> {
+impl PacketVerifier for () {
+    fn verify_packet(&mut self, _: u32, _: u64) -> SnowstormResult<()> {
+        Ok(())
+    }
+}
+
+pub trait HandshakeVerifier {
+    fn verify_public_key(&mut self, public_key: &[u8]) -> SnowstormResult<()>;
+    fn verify_timestamp(&mut self, timestamp: u32) -> SnowstormResult<()>;
+    fn verify_handshake_hash(&mut self, handshake_hash: &[u8]) -> SnowstormResult<()>;
+}
+
+impl HandshakeVerifier for () {
+    fn verify_public_key(&mut self, _: &[u8]) -> SnowstormResult<()> {
         Ok(())
     }
 
-    #[inline]
-    fn add_nonce(&mut self, _: u32, _: u64) {}
+    fn verify_timestamp(&mut self, _: u32) -> SnowstormResult<()> {
+        Ok(())
+    }
+
+    fn verify_handshake_hash(&mut self, _: &[u8]) -> SnowstormResult<()> {
+        Ok(())
+    }
 }
 
 async fn recv<P: PacketPoller>(p: &mut P, buf: &mut [u8]) -> IoResult<usize> {
@@ -73,25 +89,6 @@ impl<T: Debug, F: Debug> Debug for NoiseSocket<T, F> {
     }
 }
 
-pub trait Verifier {
-    fn verify_public_key(&mut self, public_key: &[u8]) -> bool;
-    fn verify_timestamp(&mut self, timestamp: u32) -> bool;
-    fn verify_handshake_hash(&mut self, handshake_hash: &[u8]) -> bool;
-}
-
-impl Verifier for () {
-    fn verify_public_key(&mut self, _: &[u8]) -> bool {
-        true
-    }
-
-    fn verify_timestamp(&mut self, _: u32) -> bool {
-        true
-    }
-
-    fn verify_handshake_hash(&mut self, _: &[u8]) -> bool {
-        true
-    }
-}
 impl<T, F> NoiseSocket<T, F> {
     pub fn get_inner(&self) -> &T {
         &self.inner
@@ -114,13 +111,13 @@ impl<T, F> NoiseSocket<T, F> {
     }
 }
 
-impl<T: PacketPoller, F: NonceFilter> NoiseSocket<T, F> {
-    pub async fn handshake_with_verifier<V: Verifier>(
+impl<T: PacketPoller, F: PacketVerifier> NoiseSocket<T, F> {
+    pub async fn handshake_with_verifier<V: HandshakeVerifier>(
         mut inner: T,
         mut state: HandshakeState,
         verifier: &mut V,
         filter: F,
-    ) -> Result<Self, Error> {
+    ) -> SnowstormResult<Self> {
         timer::init();
 
         let mut buf = vec![0; MAX_MESSAGE_LEN];
@@ -149,32 +146,26 @@ impl<T: PacketPoller, F: NonceFilter> NoiseSocket<T, F> {
                 let mut timestamp = [0; TIMESTAMP_LEN];
                 let n = state.read_message(&buf[..n], &mut timestamp)?;
                 if n != 4 {
-                    return Err(Error::HandshakeError("message too short".into()));
+                    return Err(SnowstormError::HandshakeError("message too short".into()));
                 }
 
                 let peer_time = u32::from_le_bytes(timestamp);
-                if !verifier.verify_timestamp(peer_time) {
-                    return Err(Error::HandshakeError("invalid timestamp".into()));
-                }
+                verifier.verify_timestamp(peer_time)?;
             }
 
             let hash = state.get_handshake_hash();
-            if !verifier.verify_handshake_hash(hash) {
-                return Err(Error::HandshakeError("invalid handshake hash".into()));
-            }
+            verifier.verify_handshake_hash(hash)?;
 
             if let Some(remote_pub) = state.get_remote_static() {
-                if !verifier.verify_public_key(remote_pub) {
-                    return Err(Error::HandshakeError("invalid public key".into()));
-                }
+                verifier.verify_public_key(remote_pub)?;
             }
         }
     }
 
-    pub async fn send(&mut self, buf: &[u8]) -> Result<usize, Error> {
+    pub async fn send(&mut self, buf: &[u8]) -> SnowstormResult<usize> {
         let len = buf.len();
         if len + TIMESTAMP_LEN + TAG_LEN > MAX_MESSAGE_LEN {
-            return Err(Error::MalformedPacket("message too long".into()));
+            return Err(SnowstormError::MalformedPacket("message too long".into()));
         }
 
         self.send_payload_buf[..TIMESTAMP_LEN].copy_from_slice(&(timestamp() as u32).to_le_bytes());
@@ -197,7 +188,7 @@ impl<T: PacketPoller, F: NonceFilter> NoiseSocket<T, F> {
         Ok(len)
     }
 
-    pub async fn recv(&mut self) -> Result<&[u8], Error> {
+    pub async fn recv(&mut self) -> SnowstormResult<&[u8]> {
         let mut read_buf = ReadBuf::new(&mut self.recv_message_buf);
         poll_fn(|cx| self.inner.poll_recv(cx, &mut read_buf)).await?;
 
@@ -210,14 +201,14 @@ impl<T: PacketPoller, F: NonceFilter> NoiseSocket<T, F> {
             .state
             .read_message(nonce, message, &mut self.recv_payload_buf)?;
         if n < TIMESTAMP_LEN {
-            return Err(Error::MalformedPacket("short packet".into()));
+            return Err(SnowstormError::MalformedPacket("short packet".into()));
         }
 
         // Validate the timestamp
         let ts = (&self.recv_payload_buf[..n]).get_u32_le();
 
         // Check if this nonce is duplicated
-        self.filter.check_nonce(ts, nonce)?;
+        self.filter.verify_packet(ts, nonce)?;
 
         Ok(&self.recv_payload_buf[TIMESTAMP_LEN..n])
     }
