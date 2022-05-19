@@ -298,8 +298,9 @@ where
                 ReadState::ServingPayload(start) => {
                     let read_buf_remaining = read_buf.remaining();
                     let buf_remaining = read_payload_buffer.len() - *start;
+
                     if buf_remaining <= read_buf_remaining {
-                        read_buf.put_slice(read_payload_buffer);
+                        read_buf.put_slice(&read_payload_buffer[*start..]);
                         *state = ReadState::Idle;
                     } else {
                         read_buf
