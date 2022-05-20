@@ -15,7 +15,7 @@ pub use snow::params::NoiseParams;
 pub use snow::Builder;
 pub use snow::Keypair;
 
-use crate::{SnowstormError, MAX_MESSAGE_LEN, TAG_LEN};
+use crate::{SnowstormError, SnowstormResult, MAX_MESSAGE_LEN, TAG_LEN};
 
 const LENGTH_FIELD_LEN: usize = std::mem::size_of::<u16>();
 
@@ -88,7 +88,7 @@ impl<T> NoiseStream<T>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    pub async fn handshake_with_verifier<F: FnOnce(&[u8]) -> bool>(
+    pub async fn handshake_with_verifier<F: FnOnce(&[u8]) -> SnowstormResult<()>>(
         mut inner: T,
         mut state: HandshakeState,
         verifier: F,
@@ -123,11 +123,7 @@ where
                 state.read_message(&message[..len], &mut payload)?;
                 if let Some(pubkey) = state.get_remote_static() {
                     if let Some(verifier) = f.take() {
-                        if !verifier(pubkey) {
-                            return Err(SnowstormError::HandshakeError(
-                                "invalid public key".into(),
-                            ));
-                        }
+                        verifier(pubkey)?;
                     }
                 }
             }
@@ -136,7 +132,7 @@ where
 
     #[inline]
     pub async fn handshake(inner: T, state: HandshakeState) -> Result<Self, SnowstormError> {
-        Self::handshake_with_verifier(inner, state, |_| true).await
+        Self::handshake_with_verifier(inner, state, |_| Ok(())).await
     }
 }
 
