@@ -335,14 +335,15 @@ mod tests {
             .generate_keypair()
             .unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:23333").await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let initiator = Builder::new(PATTERN.parse().unwrap())
                 .local_private_key(&client_key.private)
                 .remote_public_key(&server_key.public)
                 .build_initiator()
                 .unwrap();
-            let stream = TcpStream::connect("127.0.0.1:23333").await.unwrap();
+            let stream = TcpStream::connect(addr).await.unwrap();
             let mut stream = NoiseStream::handshake(stream, initiator).await.unwrap();
             let payload = (0..0x20000).map(|a| a as u8).collect::<Vec<_>>();
             stream.write_all(&payload).await.unwrap();
@@ -362,6 +363,54 @@ mod tests {
         payload.iter().enumerate().for_each(|(i, v)| {
             assert_eq!(i as u8, *v);
         });
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tcp_read_twice() -> anyhow::Result<()> {
+        static PATTERN: &str = "Noise_KK_25519_ChaChaPoly_BLAKE2s";
+        let client_key = Builder::new(PATTERN.parse().unwrap())
+            .generate_keypair()
+            .unwrap();
+        let server_key = Builder::new(PATTERN.parse().unwrap())
+            .generate_keypair()
+            .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let initiator = Builder::new(PATTERN.parse().unwrap())
+                .local_private_key(&client_key.private)
+                .remote_public_key(&server_key.public)
+                .build_initiator()
+                .unwrap();
+            let stream = TcpStream::connect(addr).await.unwrap();
+            let mut stream = NoiseStream::handshake(stream, initiator).await.unwrap();
+            let payload = (0..0x20000).map(|a| a as u8).collect::<Vec<_>>();
+            stream.write_all(&payload).await.unwrap();
+        });
+
+        let responder = Builder::new(PATTERN.parse().unwrap())
+            .local_private_key(&server_key.private)
+            .remote_public_key(&client_key.public)
+            .build_responder()
+            .unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut stream = NoiseStream::handshake(stream, responder).await.unwrap();
+        println!("{:?}", stream);
+        let mut payload1 = vec![0; 0x10000];
+        stream.read_exact(&mut payload1).await.unwrap();
+        let mut payload2 = vec![0; 0x10000];
+        stream.read_exact(&mut payload2).await.unwrap();
+
+        payload1
+            .iter()
+            .chain(payload2.iter())
+            .enumerate()
+            .for_each(|(i, v)| {
+                assert_eq!(i as u8, *v);
+            });
 
         Ok(())
     }
